@@ -25,6 +25,8 @@
 #include <Wire.h> //Needed for I2C to GPS
 
 #include "SparkFun_u-blox_GNSS_Arduino_Library.h"
+#include "gps_time.h"
+
 SFE_UBLOX_GNSS myGNSS;
 
 long lastTime = 0;
@@ -52,7 +54,26 @@ const int led_pin = 13;
 void handleRoot() {
   digitalWrite(led_pin, 1);
 
-  server.send(200, "text/plain; charset=utf-8", getUdpMessage());
+  String message = "GPS Time Server\n\n";
+
+  if (isTimeValid()) {
+    uint64_t timestampMs = getAccurateTimestampMs();
+    uint32_t seconds = timestampMs / 1000;
+    uint32_t milliseconds = timestampMs % 1000;
+
+    message += "Current Timestamp: ";
+    message += String((unsigned long)seconds);
+    message += ".";
+    message += String(milliseconds);
+    message += "\n";
+    message += "PPS Count: ";
+    message += String((unsigned long)ppsCount);
+    message += "\n";
+  } else {
+    message += "Waiting for GPS lock...\n";
+  }
+
+  server.send(200, "text/plain; charset=utf-8", message);
   delay(100); // Wait x ms so we have time to see the Led blinking
   digitalWrite(led_pin, 0);
 }
@@ -170,6 +191,49 @@ void setup() {
     while (1)
       ;
   }
+
+  // Configure Time Pulse (PPS) output on the GPS module
+  // NEO-M9N outputs PPS on its TIMEPULSE pin
+  UBX_CFG_TP5_data_t tpData;
+  if (myGNSS.getTimePulseParameters(&tpData)) {
+    Serial.println(F("[GPS] Retrieved current TimePulse parameters"));
+
+    // Configure for 1Hz PPS, but only output when locked to GNSS
+    tpData.tpIdx = 0; // TIMEPULSE (not TIMEPULSE2)
+
+    // Before GNSS lock: no pulse (freqPeriod=0 means disabled)
+    tpData.freqPeriod = 0;    // No pulse before lock
+    tpData.pulseLenRatio = 0; // No pulse before lock
+
+    // After GNSS lock: 1Hz with 100ms pulse
+    tpData.freqPeriodLock = 1000000;   // 1,000,000 us = 1 second period (1Hz)
+    tpData.pulseLenRatioLock = 100000; // 100,000 us = 100ms pulse length
+
+    // Configure flags
+    tpData.flags.bits.active = 1;         // Enable time pulse
+    tpData.flags.bits.lockGnssFreq = 1;   // Sync to GNSS when available
+    tpData.flags.bits.lockedOtherSet = 1; // Use freqPeriodLock when locked
+    tpData.flags.bits.isFreq = 0;   // freqPeriod is period (not frequency)
+    tpData.flags.bits.isLength = 1; // pulseLenRatio is length (not duty cycle)
+    tpData.flags.bits.alignToTow = 1;  // Align pulse to top of second
+    tpData.flags.bits.polarity = 1;    // Rising edge at top of second
+    tpData.flags.bits.gridUtcGnss = 0; // Align to UTC
+    tpData.flags.bits.syncMode =
+        0; // Sync mode: switch to locked, never switch back
+
+    if (myGNSS.setTimePulseParameters(&tpData)) {
+      Serial.println(F("[GPS] TimePulse configured: 1Hz PPS after GNSS lock, "
+                       "rising edge aligned to ToS"));
+    } else {
+      Serial.println(F("[GPS] ERROR: Failed to set TimePulse parameters!"));
+    }
+  } else {
+    Serial.println(F("[GPS] ERROR: Failed to get TimePulse parameters!"));
+  }
+
+  // Initialize PPS interrupt on pin 36
+  initPPS(PPS_PIN);
+
   // This will pipe all NMEA sentences to the serial port so we can see them
   // myGNSS.setNMEAOutputPort(Serial);
   // myGNSS.enableDebugging();
@@ -252,24 +316,39 @@ void loop() {
   myGNSS.checkUblox(); // See if new data is available. Process bytes as they
                        // come in.
 
-  // Query module only every second. Doing it more often will just cause I2C
-  // traffic.
-  // The module only responds when a new position is available
-  if (millis() - lastTime > 1000) {
+  // Handle PPS interrupt - print accurate timestamp when triggered
+  if (ppsTriggered) {
+    ppsTriggered = false; // Clear flag
+
+    if (isTimeValid()) {
+      uint64_t timestampMs = getAccurateTimestampMs();
+      uint32_t msOffset =
+          timestampMs % 1000; // How far past the second we are NOW
+      Serial.printf(
+          "[PPS] Pulse #%lu - Epoch: %lu.%03lu (print latency: %lums)\n",
+          ppsCount, ppsEpoch, 0, msOffset);
+    } else {
+      Serial.printf("[PPS] Pulse #%lu - Waiting for confirmed GPS time...\n",
+                    ppsCount);
+    }
+  }
+
+  // Query GPS module every 10 seconds (PPS provides sub-second timing between
+  // polls) The module only responds when a new position is available
+  if (millis() - lastTime > 10000) {
     lastTime = millis(); // Update the timer
 
     // getUnixEpoch marks the PVT data as stale so you will get Unix time and
     // PVT time on alternate seconds
 
-    uint32_t us; // microseconds returned by getUnixEpoch()
-    uint32_t epoch = myGNSS.getUnixEpoch();
-    Serial.print(F("Unix Epoch rounded: "));
+    // Get Unix epoch (only call once to avoid stale data issues)
+    uint32_t us;
+    uint32_t epoch = myGNSS.getUnixEpoch(us);
+    Serial.print(F("Unix Epoch: "));
     Serial.print(epoch, DEC);
-    epoch = myGNSS.getUnixEpoch(us);
-    Serial.print(F("  Exact Unix Epoch: "));
-    Serial.print(epoch, DEC);
-    Serial.print(F("  micros: "));
-    Serial.println(us, DEC);
+    Serial.print(F("."));
+    Serial.print(us, DEC);
+    Serial.println(F(" us"));
 
     Serial.print(myGNSS.getYear());
     Serial.print(F("-"));
@@ -299,6 +378,24 @@ void loop() {
       Serial.print(F("and "));
     }
     Serial.print(F("confirmed"));
+
+    // Sync time from GPS only if BOTH timeValid AND confirmedTime are true
+    // This ensures we have accurate, verified GPS time before trusting it
+    bool timeValid = myGNSS.getTimeValid();
+    bool timeConfirmed = myGNSS.getConfirmedTime();
+
+    if (timeValid && timeConfirmed) {
+      // Queue sync - will be applied at next PPS edge for exact alignment
+      // Note: queueTimeSync only applies on first sync, then PPS maintains time
+      queueTimeSync(epoch);
+
+      if (isTimeValid()) {
+        Serial.println(F(" [Time synced, PPS maintaining accuracy]"));
+      }
+    } else if (!isTimeValid()) {
+      Serial.println(
+          F("\n[GPS] Waiting for valid AND confirmed time before sync..."));
+    }
 
     byte SIV = myGNSS.getSIV();
     Serial.print(F("  SIV: "));
