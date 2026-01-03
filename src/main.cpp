@@ -22,6 +22,13 @@
 #include <WiFiUdp.h>
 #include <ntp.h>
 
+#include <Wire.h> //Needed for I2C to GPS
+
+#include "SparkFun_u-blox_GNSS_Arduino_Library.h"
+SFE_UBLOX_GNSS myGNSS;
+
+long lastTime = 0;
+
 static bool eth_connected = false;
 WebServer server(80);
 WiFiUDP udp;
@@ -34,6 +41,12 @@ char incomingPacket[255];
 // Extention 2 pin 1. If you want to attach the LED to another pin you need to
 // change this value accordingly.
 const int led_pin = 13;
+
+// I2C pins for GNSS module
+// Using default ESP32 I2C pins (most reliable)
+// GPIO32-39 are input-only and cannot be used for I2C
+#define GPS_SDA_PIN 33
+#define GPS_SCL_PIN 32
 
 // Web Server: handle a request to / (root of the server)
 void handleRoot() {
@@ -149,6 +162,28 @@ void setup() {
                         // 115200 bauds
   Serial.print("Setup...");
 
+  // Setup GPS
+  Wire.begin(GPS_SDA_PIN, GPS_SCL_PIN);
+  if (myGNSS.begin() == false) {
+    Serial.println(F("u-blox GNSS module not detected at default I2C address. "
+                     "Please check wiring. Freezing."));
+    while (1)
+      ;
+  }
+  // This will pipe all NMEA sentences to the serial port so we can see them
+  // myGNSS.setNMEAOutputPort(Serial);
+  // myGNSS.enableDebugging();
+
+  // Uncomment the next line if you need to completely reset your module
+  // myGNSS.factoryDefault();
+  // delay(5000); // Reset everything and wait while
+  // the module restarts
+
+  // myGNSS.setI2COutput(COM_TYPE_UBX); // Set the I2C port to output UBX only
+  //                                    // (turn off NMEA noise)
+  // myGNSS.saveConfiguration();        //Optional: Save the current settings to
+  // flash and BBR
+
   // Add a handler for network events. This is misnamed "WiFi" because the ESP32
   // is historically WiFi only, but in our case, this will react to Ethernet
   // events.
@@ -177,14 +212,14 @@ void setup() {
   // udp.begin(localUdpPort);
   // Serial.printf("UDP server started on port %d\n", localUdpPort);
 
-  xTaskCreatePinnedToCore(UdpServerTask, // Function to implement the task
-                          "udpServer",   // Name of the task
-                          4096,          // Stack size in words
-                          NULL,          // Task input parameter
-                          5,    // Priority of the task (Higher > Lower)
-                          NULL, // Task handle
-                          1     // Core where the task should run (0 or 1)
-  );
+  // xTaskCreatePinnedToCore(UdpServerTask, // Function to implement the task
+  //                         "udpServer",   // Name of the task
+  //                         4096,          // Stack size in words
+  //                         NULL,          // Task input parameter
+  //                         5,    // Priority of the task (Higher > Lower)
+  //                         NULL, // Task handle
+  //                         1     // Core where the task should run (0 or 1)
+  // );
 
   server.begin();
   Serial.println("HTTP server started");
@@ -214,5 +249,78 @@ void loop() {
   //   udp.endPacket();
   // }
 
-  delay(2); // allow the cpu to switch to other tasks
+  myGNSS.checkUblox(); // See if new data is available. Process bytes as they
+                       // come in.
+
+  // Query module only every second. Doing it more often will just cause I2C
+  // traffic.
+  // The module only responds when a new position is available
+  if (millis() - lastTime > 1000) {
+    lastTime = millis(); // Update the timer
+
+    // getUnixEpoch marks the PVT data as stale so you will get Unix time and
+    // PVT time on alternate seconds
+
+    uint32_t us; // microseconds returned by getUnixEpoch()
+    uint32_t epoch = myGNSS.getUnixEpoch();
+    Serial.print(F("Unix Epoch rounded: "));
+    Serial.print(epoch, DEC);
+    epoch = myGNSS.getUnixEpoch(us);
+    Serial.print(F("  Exact Unix Epoch: "));
+    Serial.print(epoch, DEC);
+    Serial.print(F("  micros: "));
+    Serial.println(us, DEC);
+
+    Serial.print(myGNSS.getYear());
+    Serial.print(F("-"));
+    Serial.print(myGNSS.getMonth());
+    Serial.print(F("-"));
+    Serial.print(myGNSS.getDay());
+    Serial.print(F(" "));
+    Serial.print(myGNSS.getHour());
+    Serial.print(F(":"));
+    Serial.print(myGNSS.getMinute());
+    Serial.print(F(":"));
+    Serial.print(myGNSS.getSecond());
+
+    Serial.print(F("  Time is "));
+    if (myGNSS.getTimeFullyResolved() == false) {
+      Serial.print(F("not fully resolved but "));
+    } else {
+      Serial.print(F("fully resolved and "));
+    }
+    if (myGNSS.getTimeValid() == false) {
+      Serial.print(F("not "));
+    }
+    Serial.print(F("valid "));
+    if (myGNSS.getConfirmedTime() == false) {
+      Serial.print(F("but not "));
+    } else {
+      Serial.print(F("and "));
+    }
+    Serial.print(F("confirmed"));
+
+    byte SIV = myGNSS.getSIV();
+    Serial.print(F("  SIV: "));
+    Serial.println(SIV);
+
+    // Debugging GNSS fix and position
+    Serial.print(F("GNSS Fix OK: "));
+    Serial.println(myGNSS.getGnssFixOk());
+
+    // Correctly format GNSS position data
+    Serial.print(F("Longitude (degrees): "));
+    Serial.println(myGNSS.getLongitude() / 1e7, 7);
+
+    Serial.print(F("Latitude (degrees): "));
+    Serial.println(myGNSS.getLatitude() / 1e7, 7);
+
+    Serial.print(F("Altitude (meters): "));
+    Serial.println(myGNSS.getAltitude() / 1000);
+
+    Serial.print(F("Altitude MSL (meters): "));
+    Serial.println(myGNSS.getAltitudeMSL() / 1000);
+  }
+
+  delay(100); // allow the cpu to switch to other tasks
 }
