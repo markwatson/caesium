@@ -16,10 +16,16 @@
  * even while GPS I2C communication is in progress.
  */
 
+#include <ESPmDNS.h>
+#include <ETH.h>
 #include <Wire.h>
 
 #include "SparkFun_u-blox_GNSS_Arduino_Library.h"
 #include "gps_time.h"
+#include "ntp.h"
+
+// Hostname used for both ETH and mDNS
+const char HOSTNAME[] = "caesium";
 
 // GPS module instance
 SFE_UBLOX_GNSS myGNSS;
@@ -30,7 +36,8 @@ SFE_UBLOX_GNSS myGNSS;
 
 // GPS polling configuration
 const unsigned long GPS_POLL_INTERVAL_MS = 60000; // Poll GPS every 60 seconds
-const unsigned long GPS_STARTUP_POLL_MS = 2000;   // Poll faster at startup until lock
+const unsigned long GPS_STARTUP_POLL_MS =
+    2000; // Poll faster at startup until lock
 
 // Status print interval
 const unsigned long STATUS_PRINT_INTERVAL = 5000;
@@ -41,6 +48,62 @@ SemaphoreHandle_t i2cMutex = NULL;
 
 // Task handle for GPS polling
 TaskHandle_t gpsTaskHandle = NULL;
+
+// Task handle for NTP server
+TaskHandle_t ntpTaskHandle = NULL;
+
+// Ethernet connection state
+static bool ethConnected = false;
+static bool ntpServerStarted = false;
+
+// Ethernet event handler
+void onEthEvent(WiFiEvent_t event) {
+  switch (event) {
+  case ARDUINO_EVENT_ETH_START:
+    Serial.println(F("[ETH] Started"));
+    ETH.setHostname(HOSTNAME);
+    break;
+
+  case ARDUINO_EVENT_ETH_CONNECTED:
+    Serial.println(F("[ETH] Link up"));
+    break;
+
+  case ARDUINO_EVENT_ETH_GOT_IP:
+    Serial.printf("[ETH] Got IP: %s (MAC: %s, %dMbps %s)\n",
+                  ETH.localIP().toString().c_str(), ETH.macAddress().c_str(),
+                  ETH.linkSpeed(),
+                  ETH.fullDuplex() ? "Full Duplex" : "Half Duplex");
+    ethConnected = true;
+
+    // Start NTP server now that network is ready
+    if (!ntpServerStarted) {
+      xTaskCreatePinnedToCore(NtpServerTask,  // Task function
+                              "NTP_Server",   // Task name
+                              4096,           // Stack size (bytes)
+                              NULL,           // Parameters
+                              2,              // Priority
+                              &ntpTaskHandle, // Task handle
+                              0               // Core 0 (networking core)
+      );
+      ntpServerStarted = true;
+      Serial.println(F("[NTP] Server task started"));
+    }
+    break;
+
+  case ARDUINO_EVENT_ETH_DISCONNECTED:
+    Serial.println(F("[ETH] Disconnected"));
+    ethConnected = false;
+    break;
+
+  case ARDUINO_EVENT_ETH_STOP:
+    Serial.println(F("[ETH] Stopped"));
+    ethConnected = false;
+    break;
+
+  default:
+    break;
+  }
+}
 
 // Configure the GPS TimePulse (PPS) output
 void configureTimePulse() {
@@ -68,14 +131,15 @@ void configureTimePulse() {
   tpData.flags.bits.lockGnssFreq = 1;   // Sync to GNSS when available
   tpData.flags.bits.lockedOtherSet = 1; // Use freqPeriodLock when locked
   tpData.flags.bits.isFreq = 0;         // freqPeriod is period (not frequency)
-  tpData.flags.bits.isLength = 1;       // pulseLenRatio is length (not duty cycle)
-  tpData.flags.bits.alignToTow = 1;     // Align pulse to top of second
-  tpData.flags.bits.polarity = 1;       // Rising edge at top of second
-  tpData.flags.bits.gridUtcGnss = 0;    // Align to UTC
-  tpData.flags.bits.syncMode = 0;       // Sync mode
+  tpData.flags.bits.isLength = 1;    // pulseLenRatio is length (not duty cycle)
+  tpData.flags.bits.alignToTow = 1;  // Align pulse to top of second
+  tpData.flags.bits.polarity = 1;    // Rising edge at top of second
+  tpData.flags.bits.gridUtcGnss = 0; // Align to UTC
+  tpData.flags.bits.syncMode = 0;    // Sync mode
 
   if (myGNSS.setTimePulseParameters(&tpData)) {
-    Serial.println(F("[GPS] PPS configured: 1Hz after lock, rising edge aligned to ToS"));
+    Serial.println(
+        F("[GPS] PPS configured: 1Hz after lock, rising edge aligned to ToS"));
   } else {
     Serial.println(F("[GPS] ERROR: Failed to set TimePulse parameters"));
   }
@@ -99,8 +163,9 @@ void pollGpsTime() {
   xSemaphoreGive(i2cMutex);
 
   // Debug output (outside mutex - Serial is thread-safe on ESP32)
-  Serial.printf("[GPS] Epoch: %lu.%06lu | Valid: %d | Confirmed: %d | SIV: %d\n",
-                epoch, us, timeValid, timeConfirmed, siv);
+  Serial.printf(
+      "[GPS] Epoch: %lu.%06lu | Valid: %d | Confirmed: %d | SIV: %d\n", epoch,
+      us, timeValid, timeConfirmed, siv);
 
   // Sync time only if BOTH valid AND confirmed
   if (timeValid && timeConfirmed) {
@@ -148,8 +213,8 @@ void printStatus() {
       xSemaphoreGive(i2cMutex);
     }
 
-    Serial.printf("[STATUS] Time: %lu.%03lu | PPS: %lu | SIV: %d\n",
-                  seconds, ms, ppsCount, siv);
+    Serial.printf("[STATUS] Time: %lu.%03lu | PPS: %lu | SIV: %d\n", seconds,
+                  ms, ppsCount, siv);
   } else {
     Serial.printf("[STATUS] Waiting for GPS lock... | PPS: %lu\n", ppsCount);
   }
@@ -167,7 +232,8 @@ void setup() {
   i2cMutex = xSemaphoreCreateMutex();
   if (i2cMutex == NULL) {
     Serial.println(F("[INIT] ERROR: Failed to create I2C mutex!"));
-    while (1) delay(1000);
+    while (1)
+      delay(1000);
   }
 
   // Initialize GPS via I2C
@@ -177,7 +243,8 @@ void setup() {
   Serial.println(F("[INIT] Connecting to GPS module..."));
   if (!myGNSS.begin()) {
     Serial.println(F("[INIT] ERROR: GPS module not detected! Check wiring."));
-    while (1) delay(1000);
+    while (1)
+      delay(1000);
   }
   Serial.println(F("[INIT] GPS module connected"));
 
@@ -190,17 +257,27 @@ void setup() {
   // Create GPS polling task on Core 1 with low priority
   // Priority 1 is lower than default loop() priority (1), so it won't block
   // Stack size 4KB should be plenty for GPS polling
-  xTaskCreatePinnedToCore(
-    gpsPollingTask,   // Task function
-    "GPS_Poll",       // Task name
-    4096,             // Stack size (bytes)
-    NULL,             // Parameters
-    1,                // Priority (low - won't block main loop)
-    &gpsTaskHandle,   // Task handle
-    1                 // Core 1 (same as loop, but lower priority)
+  xTaskCreatePinnedToCore(gpsPollingTask, // Task function
+                          "GPS_Poll",     // Task name
+                          4096,           // Stack size (bytes)
+                          NULL,           // Parameters
+                          1, // Priority (low - won't block main loop)
+                          &gpsTaskHandle, // Task handle
+                          1 // Core 1 (same as loop, but lower priority)
   );
 
-  Serial.println(F("[INIT] Setup complete - GPS polling task started\n"));
+  // Initialize Ethernet
+  // NTP server task will be started when we get an IP address
+  Serial.println(F("[INIT] Starting Ethernet..."));
+  WiFi.onEvent(onEthEvent);
+  ETH.begin();
+  // multicast DNS (mDNS) allows to resolve hostnames to IP addresses without a
+  // DNS server
+  if (MDNS.begin(HOSTNAME)) {
+    Serial.printf("MDNS responder started, listening on %s.local\n", HOSTNAME);
+  }
+
+  Serial.println(F("[INIT] Setup complete - waiting for network...\n"));
 }
 
 void loop() {
@@ -220,8 +297,8 @@ void loop() {
     if (isTimeValid()) {
       uint64_t timestampMs = getAccurateTimestampMs();
       uint32_t msOffset = timestampMs % 1000;
-      Serial.printf("[PPS] #%lu | Epoch: %lu (latency: %lums)\n",
-                    ppsCount, ppsEpoch, msOffset);
+      Serial.printf("[PPS] #%lu | Epoch: %lu (latency: %lums)\n", ppsCount,
+                    ppsEpoch, msOffset);
     } else {
       Serial.printf("[PPS] #%lu | Waiting for time sync...\n", ppsCount);
     }
@@ -233,9 +310,9 @@ void loop() {
     printStatus();
   }
 
-  // TODO: NTP server handling will go here
-  // The main loop is now free to respond to UDP packets quickly
-  // since GPS polling happens in a background task
+  // NTP server runs in its own task on Core 0
+  // GPS polling runs in background task on Core 1
+  // Main loop handles PPS events and status reporting
 
   // Minimal delay - just yield to other tasks briefly
   vTaskDelay(1);
