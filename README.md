@@ -1,49 +1,58 @@
-# Caesium — GPS-disciplined NTP Time Server
+# Caesium — GPS-Disciplined NTP Time Server
 
-Small, homebrew NTP server using an ESP32-PoE-ISO and a GPS module (SparkFun NEO-M9N).
+Homebrew Stratum-1 NTP server using an ESP32-PoE-ISO and SparkFun NEO-M9N GPS module.
 
-Features
+## Features
 
 - Stratum-1 NTP server using GPS + PPS for accurate time
 - UDP NTP server (port 123) implemented using lwIP sockets
-- Ethernet + mDNS advertising as `caesium.local`
-- Lightweight design: GPS polling and PPS handling on Core 1, NTP server on Core 0
+- Ethernet connectivity with mDNS advertising as `caesium.local`
+- Lightweight dual-core design: GPS polling and PPS handling on Core 1, NTP server on Core 0
 
-Hardware
+## Hardware
 
-- ESP32-PoE-ISO (Olimex) or equivalent ESP32 board with Ethernet
-- SparkFun NEO-M9N GPS module (I2C) with PPS output wired to GPIO36
+- **ESP32-PoE-ISO** (Olimex) or equivalent ESP32 board with Ethernet
+- **SparkFun NEO-M9N** GPS module (I2C) with PPS output wired to GPIO36
 
-Building
+## Building
 
-Requires PlatformIO.
+Requires [PlatformIO](https://platformio.org/) 🇺🇦.
 
 ```bash
-# Build
 ~/.platformio/penv/bin/pio run
-
-# Upload and monitor (adjust environment if needed)
-~/.platformio/penv/bin/pio run --target upload --environment esp32-poe-iso
-~/.platformio/penv/bin/pio device monitor --environment esp32-poe-iso
 ```
 
-Usage
+## Usage
 
-- The device advertises itself via mDNS as `caesium.local` (hostname `caesium`).
-- Test with the included Python script `test_ntp.py` (Python 3, stdlib only):
+The device advertises itself via mDNS as `caesium.local`. Test with the included Python scripts:
 
 ```bash
+# Single NTP query test
 python3 test_ntp.py caesium.local
-# or use IP address
-python3 test_ntp.py 192.168.1.123
+
+# Continuous monitoring with statistics
+python3 test_stability.py caesium.local
 ```
 
-Notes and tips
+You can also use standard tools like `sntp`:
 
-- The server runs as Stratum 1 when GPS is locked; if GPS isn't locked yet it will respond with `LI=3` (unsynchronized).
-- Without hardware packet timestamping, expect tens of milliseconds of offset/jitter; a local NTP client (chrony/ntpd) will converge and discipline the clock.
-- `test_ntp.py` prints round-trip delay and estimated clock offset between the client and server.
+```bash
+sntp caesium.local
+```
 
-License
+## Notes
 
-- MIT (see LICENSE file if present)
+- The server reports Stratum 1 when GPS is locked; unsynchronized (`LI=3`) otherwise
+- Without hardware packet timestamping, expect tens of milliseconds of offset/jitter
+- Local NTP clients (chrony/ntpd) will converge and discipline the system clock
+- `test_ntp.py` prints round-trip delay and clock offset estimates
+- `test_stability.py` monitors continuously and collects statistics over time
+
+## License
+
+MIT (see [LICENSE](LICENSE))
+
+## Dependencies
+
+- [OLIMEX ESP32-POE-ISO](https://github.com/OLIMEX/ESP32-POE-ISO)
+- [SparkFun u-blox GNSS Arduino Library](https://github.com/sparkfun/SparkFun_u-blox_GNSS_Arduino_Library)
