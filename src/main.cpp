@@ -1,423 +1,171 @@
 /*
- * This example combines the Espressif examples:
- * WebServer --> HelloServer
- * Ethernet --> ETH_LAN8720
- * It implements a webserver using the ethernet interface (instead of WiFi)
+ * Caesium - GPS-disciplined NTP Time Server
  *
- * Once the sktech is compiled and uploaded, the board will log
- * its IP address to the Serial Monitor (should be set to 115000 bauds)
+ * This firmware implements a precise time source using:
+ * - SparkFun NEO-M9N GPS module for time reference
+ * - PPS (Pulse Per Second) interrupt for microsecond accuracy
+ * - ESP32-PoE-ISO (Olimex) as the microcontroller
  *
- * Open the IP in your browser and you should see
- * a message on the homepage: "hello from esp32!"
- * If you append "/inline" to the end of the address
- * you should see: "this works as well"
- *
- * Tested with Espressif package (2.0.11)
- * and Olimex board ESP32-PoE and ESP32-EVB
+ * The GPS module provides time via I2C, while the PPS signal triggers
+ * an interrupt at the exact start of each second, allowing sub-millisecond
+ * time accuracy.
  */
 
-#include <ESPmDNS.h>
-#include <ETH.h>
-#include <WebServer.h>
-#include <WiFiUdp.h>
-#include <ntp.h>
-
-#include <Wire.h> //Needed for I2C to GPS
+#include <Wire.h>
 
 #include "SparkFun_u-blox_GNSS_Arduino_Library.h"
 #include "gps_time.h"
 
+// GPS module instance
 SFE_UBLOX_GNSS myGNSS;
 
-long lastTime = 0;
-
-static bool eth_connected = false;
-WebServer server(80);
-WiFiUDP udp;
-unsigned int localUdpPort = 4210;
-char incomingPacket[255];
-
-// ESP32-POE doesn't have an onboard LED so if you want to use a LED you have to
-// attach one to the extended pins on either UEXT or one of the 10 pin
-// extentions. in this example the default value is 13 which is UEXT pin 6, or
-// Extention 2 pin 1. If you want to attach the LED to another pin you need to
-// change this value accordingly.
-const int led_pin = 13;
-
 // I2C pins for GNSS module
-// Using default ESP32 I2C pins (most reliable)
-// GPIO32-39 are input-only and cannot be used for I2C
 #define GPS_SDA_PIN 33
 #define GPS_SCL_PIN 32
 
-// Web Server: handle a request to / (root of the server)
-void handleRoot() {
-  digitalWrite(led_pin, 1);
+// Timing for periodic tasks
+unsigned long lastGpsPoll = 0;
+unsigned long lastStatusPrint = 0;
 
-  String message = "GPS Time Server\n\n";
+const unsigned long GPS_POLL_INTERVAL = 60500;    // Poll GPS every 60.5 seconds
+const unsigned long STATUS_PRINT_INTERVAL = 5000; // Print status every 5 seconds
+
+// Configure the GPS TimePulse (PPS) output
+void configureTimePulse() {
+  UBX_CFG_TP5_data_t tpData;
+
+  if (!myGNSS.getTimePulseParameters(&tpData)) {
+    Serial.println(F("[GPS] ERROR: Failed to get TimePulse parameters"));
+    return;
+  }
+
+  Serial.println(F("[GPS] Configuring TimePulse (PPS)..."));
+
+  tpData.tpIdx = 0; // TIMEPULSE (not TIMEPULSE2)
+
+  // Before GNSS lock: no pulse
+  tpData.freqPeriod = 0;
+  tpData.pulseLenRatio = 0;
+
+  // After GNSS lock: 1Hz with 100ms pulse
+  tpData.freqPeriodLock = 1000000;   // 1 second period (1Hz)
+  tpData.pulseLenRatioLock = 100000; // 100ms pulse length
+
+  // Configure flags
+  tpData.flags.bits.active = 1;         // Enable time pulse
+  tpData.flags.bits.lockGnssFreq = 1;   // Sync to GNSS when available
+  tpData.flags.bits.lockedOtherSet = 1; // Use freqPeriodLock when locked
+  tpData.flags.bits.isFreq = 0;         // freqPeriod is period (not frequency)
+  tpData.flags.bits.isLength = 1;       // pulseLenRatio is length (not duty cycle)
+  tpData.flags.bits.alignToTow = 1;     // Align pulse to top of second
+  tpData.flags.bits.polarity = 1;       // Rising edge at top of second
+  tpData.flags.bits.gridUtcGnss = 0;    // Align to UTC
+  tpData.flags.bits.syncMode = 0;       // Sync mode
+
+  if (myGNSS.setTimePulseParameters(&tpData)) {
+    Serial.println(F("[GPS] PPS configured: 1Hz after lock, rising edge aligned to ToS"));
+  } else {
+    Serial.println(F("[GPS] ERROR: Failed to set TimePulse parameters"));
+  }
+}
+
+// Print periodic system status
+void printStatus() {
+  Serial.println(F("----------------------------------------"));
 
   if (isTimeValid()) {
     uint64_t timestampMs = getAccurateTimestampMs();
     uint32_t seconds = timestampMs / 1000;
-    uint32_t milliseconds = timestampMs % 1000;
+    uint32_t ms = timestampMs % 1000;
 
-    message += "Current Timestamp: ";
-    message += String((unsigned long)seconds);
-    message += ".";
-    message += String(milliseconds);
-    message += "\n";
-    message += "PPS Count: ";
-    message += String((unsigned long)ppsCount);
-    message += "\n";
+    Serial.printf("[STATUS] Time: %lu.%03lu | PPS: %lu | SIV: %d\n",
+                  seconds, ms, ppsCount, myGNSS.getSIV());
   } else {
-    message += "Waiting for GPS lock...\n";
-  }
-
-  server.send(200, "text/plain; charset=utf-8", message);
-  delay(100); // Wait x ms so we have time to see the Led blinking
-  digitalWrite(led_pin, 0);
-}
-
-// Web Server: handle a request to an unknown URI (unknown "File")
-void handleNotFound() {
-  digitalWrite(led_pin, 1);
-  String message = "File Not Found\n\n";
-  message += "URI: ";
-  message += server.uri();
-  message += "\nMethod: ";
-  message += (server.method() == HTTP_GET) ? "GET" : "POST";
-  message += "\nArguments: ";
-  message += server.args();
-  message += "\n";
-  for (uint8_t i = 0; i < server.args(); i++) {
-    message += " " + server.argName(i) + ": " + server.arg(i) + "\n";
-  }
-  server.send(404, "text/plain", message);
-  // digitalWrite(led_pin, 0);  // If this is commented out, the LED will stay
-  // on in case of 404 error
-}
-
-// Handle Ethernet Events:
-void WiFiEvent(WiFiEvent_t event) {
-  switch (event) {
-
-  case ARDUINO_EVENT_ETH_START:
-    // This will happen during setup, when the Ethernet service starts
-    Serial.println("ETH Started");
-    // set eth hostname here
-    ETH.setHostname("esp32-ethernet");
-    break;
-
-  case ARDUINO_EVENT_ETH_CONNECTED:
-    // This will happen when the Ethernet cable is plugged
-    Serial.println("ETH Connected");
-    break;
-
-  case ARDUINO_EVENT_ETH_GOT_IP:
-    // This will happen when we obtain an IP address through DHCP:
-    Serial.print("Got an IP Address for ETH MAC: ");
-    Serial.print(ETH.macAddress());
-    Serial.print(", IPv4: ");
-    Serial.print(ETH.localIP());
-    if (ETH.fullDuplex()) {
-      Serial.print(", FULL_DUPLEX");
-    }
-    Serial.print(", ");
-    Serial.print(ETH.linkSpeed());
-    Serial.println("Mbps");
-    eth_connected = true;
-
-    // Uncomment to automatically make a test connection to a server:
-    // testClient( "192.168.0.1", 80 );
-
-    break;
-
-  case ARDUINO_EVENT_ETH_DISCONNECTED:
-    // This will happen when the Ethernet cable is unplugged
-    Serial.println("ETH Disconnected");
-    eth_connected = false;
-    break;
-
-  case ARDUINO_EVENT_ETH_STOP:
-    // This will happen when the ETH interface is stopped but this never happens
-    Serial.println("ETH Stopped");
-    eth_connected = false;
-    break;
-
-  default:
-    break;
+    Serial.printf("[STATUS] Waiting for GPS lock... | PPS: %lu | SIV: %d\n",
+                  ppsCount, myGNSS.getSIV());
   }
 }
 
-// Try to read something from a webserver:
-void testClient(const char *host, uint16_t port) {
-  Serial.print("\nConnecting to ");
-  Serial.print(host);
-  Serial.print(":");
-  Serial.println(port);
+// Poll GPS for time sync (called every GPS_POLL_INTERVAL)
+void pollGpsTime() {
+  uint32_t us;
+  uint32_t epoch = myGNSS.getUnixEpoch(us);
 
-  WiFiClient client;
-  if (!client.connect(host, port)) {
-    Serial.println("connection failed");
-    return;
-  }
-  client.printf("GET / HTTP/1.1\r\nHost: %s\r\n\r\n", host);
-  while (client.connected() && !client.available())
-    ;
-  while (client.available()) {
-    Serial.write(client.read());
-  }
+  bool timeValid = myGNSS.getTimeValid();
+  bool timeConfirmed = myGNSS.getConfirmedTime();
+  bool timeFullyResolved = myGNSS.getTimeFullyResolved();
 
-  Serial.println("closing connection\n");
-  client.stop();
+  // Debug: show GPS-reported time status
+  Serial.printf("[GPS] Epoch: %lu.%06lu | Valid: %d | Confirmed: %d | Resolved: %d\n",
+                epoch, us, timeValid, timeConfirmed, timeFullyResolved);
+
+  // Sync time only if BOTH valid AND confirmed
+  if (timeValid && timeConfirmed) {
+    queueTimeSync(epoch);
+  } else if (!isTimeValid()) {
+    Serial.println(F("[GPS] Waiting for valid AND confirmed time..."));
+  }
 }
 
-// Initializing everything at start up / after reset:
 void setup() {
-  // Wait for the hardware to initialize:
-  delay(500);
+  delay(500); // Wait for hardware to stabilize
 
-  // This sketch will log some information to the serial console:
+  Serial.begin(115200);
+  Serial.println(F("\n\n========================================"));
+  Serial.println(F("       Caesium GPS Time Server"));
+  Serial.println(F("========================================\n"));
 
-  Serial.begin(115200); // Assuming computer will be connected to serial port at
-                        // 115200 bauds
-  Serial.print("Setup...");
-
-  // Setup GPS
+  // Initialize GPS via I2C
+  Serial.println(F("[INIT] Starting I2C..."));
   Wire.begin(GPS_SDA_PIN, GPS_SCL_PIN);
-  if (myGNSS.begin() == false) {
-    Serial.println(F("u-blox GNSS module not detected at default I2C address. "
-                     "Please check wiring. Freezing."));
-    while (1)
-      ;
-  }
 
-  // Configure Time Pulse (PPS) output on the GPS module
-  // NEO-M9N outputs PPS on its TIMEPULSE pin
-  UBX_CFG_TP5_data_t tpData;
-  if (myGNSS.getTimePulseParameters(&tpData)) {
-    Serial.println(F("[GPS] Retrieved current TimePulse parameters"));
-
-    // Configure for 1Hz PPS, but only output when locked to GNSS
-    tpData.tpIdx = 0; // TIMEPULSE (not TIMEPULSE2)
-
-    // Before GNSS lock: no pulse (freqPeriod=0 means disabled)
-    tpData.freqPeriod = 0;    // No pulse before lock
-    tpData.pulseLenRatio = 0; // No pulse before lock
-
-    // After GNSS lock: 1Hz with 100ms pulse
-    tpData.freqPeriodLock = 1000000;   // 1,000,000 us = 1 second period (1Hz)
-    tpData.pulseLenRatioLock = 100000; // 100,000 us = 100ms pulse length
-
-    // Configure flags
-    tpData.flags.bits.active = 1;         // Enable time pulse
-    tpData.flags.bits.lockGnssFreq = 1;   // Sync to GNSS when available
-    tpData.flags.bits.lockedOtherSet = 1; // Use freqPeriodLock when locked
-    tpData.flags.bits.isFreq = 0;   // freqPeriod is period (not frequency)
-    tpData.flags.bits.isLength = 1; // pulseLenRatio is length (not duty cycle)
-    tpData.flags.bits.alignToTow = 1;  // Align pulse to top of second
-    tpData.flags.bits.polarity = 1;    // Rising edge at top of second
-    tpData.flags.bits.gridUtcGnss = 0; // Align to UTC
-    tpData.flags.bits.syncMode =
-        0; // Sync mode: switch to locked, never switch back
-
-    if (myGNSS.setTimePulseParameters(&tpData)) {
-      Serial.println(F("[GPS] TimePulse configured: 1Hz PPS after GNSS lock, "
-                       "rising edge aligned to ToS"));
-    } else {
-      Serial.println(F("[GPS] ERROR: Failed to set TimePulse parameters!"));
+  Serial.println(F("[INIT] Connecting to GPS module..."));
+  if (!myGNSS.begin()) {
+    Serial.println(F("[INIT] ERROR: GPS module not detected! Check wiring."));
+    while (1) {
+      delay(1000);
     }
-  } else {
-    Serial.println(F("[GPS] ERROR: Failed to get TimePulse parameters!"));
   }
+  Serial.println(F("[INIT] GPS module connected"));
 
-  // Initialize PPS interrupt on pin 36
+  // Configure PPS output on GPS module
+  configureTimePulse();
+
+  // Initialize PPS interrupt
   initPPS(PPS_PIN);
 
-  // This will pipe all NMEA sentences to the serial port so we can see them
-  // myGNSS.setNMEAOutputPort(Serial);
-  // myGNSS.enableDebugging();
-
-  // Uncomment the next line if you need to completely reset your module
-  // myGNSS.factoryDefault();
-  // delay(5000); // Reset everything and wait while
-  // the module restarts
-
-  // myGNSS.setI2COutput(COM_TYPE_UBX); // Set the I2C port to output UBX only
-  //                                    // (turn off NMEA noise)
-  // myGNSS.saveConfiguration();        //Optional: Save the current settings to
-  // flash and BBR
-
-  // Add a handler for network events. This is misnamed "WiFi" because the ESP32
-  // is historically WiFi only, but in our case, this will react to Ethernet
-  // events.
-  Serial.print("Registering event handler for ETH events...");
-  WiFi.onEvent(WiFiEvent);
-
-  // Starth Ethernet (this does NOT start WiFi at the same time)
-  Serial.print("Starting ETH interface...");
-  ETH.begin();
-
-  // multicast DNS (mDNS) allows to resolve hostnames to IP addresses without a
-  // DNS server
-  if (MDNS.begin("esp32")) { // using mDNS name "esp32"
-    Serial.println("MDNS responder started");
-  }
-
-  // Web Server handlers:
-  // Handle a request to / (root of the server)
-  server.on("/", handleRoot);
-  // Minimalistic handling of another URI (LED will not flash on this one):
-  server.on("/inline",
-            []() { server.send(200, "text/plain", "this works as well"); });
-  // Handle all other URIs:
-  server.onNotFound(handleNotFound);
-
-  // udp.begin(localUdpPort);
-  // Serial.printf("UDP server started on port %d\n", localUdpPort);
-
-  // xTaskCreatePinnedToCore(UdpServerTask, // Function to implement the task
-  //                         "udpServer",   // Name of the task
-  //                         4096,          // Stack size in words
-  //                         NULL,          // Task input parameter
-  //                         5,    // Priority of the task (Higher > Lower)
-  //                         NULL, // Task handle
-  //                         1     // Core where the task should run (0 or 1)
-  // );
-
-  server.begin();
-  Serial.println("HTTP server started");
-
-  pinMode(led_pin,
-          OUTPUT); // Initialize the LED pin as a digital output (on/off)
+  Serial.println(F("[INIT] Setup complete - waiting for GPS lock...\n"));
 }
 
 void loop() {
-  server.handleClient();
+  // Process incoming GPS data
+  myGNSS.checkUblox();
 
-  // int packetSize = udp.parsePacket();
-  // if (packetSize) {
-  //   Serial.printf("Received %d bytes from %s, port %d\n", packetSize,
-  //                 udp.remoteIP().toString().c_str(), udp.remotePort());
-  //   int len = udp.read(incomingPacket, 255);
-  //   if (len > 0) {
-  //     incomingPacket[len] = 0;
-  //   }
-  //   Serial.printf("UDP packet contents: %s\n", incomingPacket);
-  //   snprintf(message, sizeof(message), "Received UDP packet: %s",
-  //            incomingPacket);
-
-  //   // Send back a reply, to the IP address and port we got the packet from
-  //   udp.beginPacket(udp.remoteIP(), udp.remotePort());
-  //   udp.write((const uint8_t *)"Acknowledged", 12);
-  //   udp.endPacket();
-  // }
-
-  myGNSS.checkUblox(); // See if new data is available. Process bytes as they
-                       // come in.
-
-  // Handle PPS interrupt - print accurate timestamp when triggered
+  // Handle PPS interrupt
   if (ppsTriggered) {
-    ppsTriggered = false; // Clear flag
+    ppsTriggered = false;
 
     if (isTimeValid()) {
       uint64_t timestampMs = getAccurateTimestampMs();
-      uint32_t msOffset =
-          timestampMs % 1000; // How far past the second we are NOW
-      Serial.printf(
-          "[PPS] Pulse #%lu - Epoch: %lu.%03lu (print latency: %lums)\n",
-          ppsCount, ppsEpoch, 0, msOffset);
+      uint32_t msOffset = timestampMs % 1000;
+      Serial.printf("[PPS] #%lu | Epoch: %lu (latency: %lums)\n",
+                    ppsCount, ppsEpoch, msOffset);
     } else {
-      Serial.printf("[PPS] Pulse #%lu - Waiting for confirmed GPS time...\n",
-                    ppsCount);
+      Serial.printf("[PPS] #%lu | Waiting for time sync...\n", ppsCount);
     }
   }
 
-  // Query GPS module every 10 seconds (PPS provides sub-second timing between
-  // polls) The module only responds when a new position is available
-  if (millis() - lastTime > 10000) {
-    lastTime = millis(); // Update the timer
-
-    // getUnixEpoch marks the PVT data as stale so you will get Unix time and
-    // PVT time on alternate seconds
-
-    // Get Unix epoch (only call once to avoid stale data issues)
-    uint32_t us;
-    uint32_t epoch = myGNSS.getUnixEpoch(us);
-    Serial.print(F("Unix Epoch: "));
-    Serial.print(epoch, DEC);
-    Serial.print(F("."));
-    Serial.print(us, DEC);
-    Serial.println(F(" us"));
-
-    Serial.print(myGNSS.getYear());
-    Serial.print(F("-"));
-    Serial.print(myGNSS.getMonth());
-    Serial.print(F("-"));
-    Serial.print(myGNSS.getDay());
-    Serial.print(F(" "));
-    Serial.print(myGNSS.getHour());
-    Serial.print(F(":"));
-    Serial.print(myGNSS.getMinute());
-    Serial.print(F(":"));
-    Serial.print(myGNSS.getSecond());
-
-    Serial.print(F("  Time is "));
-    if (myGNSS.getTimeFullyResolved() == false) {
-      Serial.print(F("not fully resolved but "));
-    } else {
-      Serial.print(F("fully resolved and "));
-    }
-    if (myGNSS.getTimeValid() == false) {
-      Serial.print(F("not "));
-    }
-    Serial.print(F("valid "));
-    if (myGNSS.getConfirmedTime() == false) {
-      Serial.print(F("but not "));
-    } else {
-      Serial.print(F("and "));
-    }
-    Serial.print(F("confirmed"));
-
-    // Sync time from GPS only if BOTH timeValid AND confirmedTime are true
-    // This ensures we have accurate, verified GPS time before trusting it
-    bool timeValid = myGNSS.getTimeValid();
-    bool timeConfirmed = myGNSS.getConfirmedTime();
-
-    if (timeValid && timeConfirmed) {
-      // Queue sync - will be applied at next PPS edge for exact alignment
-      // Note: queueTimeSync only applies on first sync, then PPS maintains time
-      queueTimeSync(epoch);
-
-      if (isTimeValid()) {
-        Serial.println(F(" [Time synced, PPS maintaining accuracy]"));
-      }
-    } else if (!isTimeValid()) {
-      Serial.println(
-          F("\n[GPS] Waiting for valid AND confirmed time before sync..."));
-    }
-
-    byte SIV = myGNSS.getSIV();
-    Serial.print(F("  SIV: "));
-    Serial.println(SIV);
-
-    // Debugging GNSS fix and position
-    Serial.print(F("GNSS Fix OK: "));
-    Serial.println(myGNSS.getGnssFixOk());
-
-    // Correctly format GNSS position data
-    Serial.print(F("Longitude (degrees): "));
-    Serial.println(myGNSS.getLongitude() / 1e7, 7);
-
-    Serial.print(F("Latitude (degrees): "));
-    Serial.println(myGNSS.getLatitude() / 1e7, 7);
-
-    Serial.print(F("Altitude (meters): "));
-    Serial.println(myGNSS.getAltitude() / 1000);
-
-    Serial.print(F("Altitude MSL (meters): "));
-    Serial.println(myGNSS.getAltitudeMSL() / 1000);
+  // Poll GPS for time updates
+  if (millis() - lastGpsPoll >= GPS_POLL_INTERVAL) {
+    lastGpsPoll = millis();
+    pollGpsTime();
   }
 
-  delay(100); // allow the cpu to switch to other tasks
+  // Print periodic status
+  if (millis() - lastStatusPrint >= STATUS_PRINT_INTERVAL) {
+    lastStatusPrint = millis();
+    printStatus();
+  }
+
+  delay(10); // Small delay to allow other tasks
 }
