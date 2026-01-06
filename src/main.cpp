@@ -34,20 +34,12 @@ SFE_UBLOX_GNSS myGNSS;
 #define GPS_SDA_PIN 33
 #define GPS_SCL_PIN 32
 
-// GPS polling configuration
-const unsigned long GPS_POLL_INTERVAL_MS = 60000; // Poll GPS every 60 seconds
-const unsigned long GPS_STARTUP_POLL_MS =
-    2000; // Poll faster at startup until lock
-
 // Status print interval
 const unsigned long STATUS_PRINT_INTERVAL = 5000;
 unsigned long lastStatusPrint = 0;
 
 // Mutex for I2C access (GPS library isn't thread-safe)
 SemaphoreHandle_t i2cMutex = NULL;
-
-// Task handle for GPS polling
-TaskHandle_t gpsTaskHandle = NULL;
 
 // Task handle for NTP server
 TaskHandle_t ntpTaskHandle = NULL;
@@ -145,58 +137,6 @@ void configureTimePulse() {
   }
 }
 
-// Poll GPS for time sync (called from GPS task)
-void pollGpsTime() {
-  // Take I2C mutex before accessing GPS
-  if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
-    Serial.println(F("[GPS] ERROR: Could not acquire I2C mutex"));
-    return;
-  }
-
-  uint32_t us;
-  uint32_t epoch = myGNSS.getUnixEpoch(us);
-  bool timeValid = myGNSS.getTimeValid();
-  bool timeConfirmed = myGNSS.getConfirmedTime();
-  byte siv = myGNSS.getSIV();
-
-  // Release mutex as soon as I2C operations are done
-  xSemaphoreGive(i2cMutex);
-
-  // Debug output (outside mutex - Serial is thread-safe on ESP32)
-  Serial.printf(
-      "[GPS] Epoch: %lu.%06lu | Valid: %d | Confirmed: %d | SIV: %d\n", epoch,
-      us, timeValid, timeConfirmed, siv);
-
-  // Sync time only if BOTH valid AND confirmed
-  if (timeValid && timeConfirmed) {
-    queueTimeSync(epoch);
-  } else if (!isTimeValid()) {
-    Serial.println(F("[GPS] Waiting for valid AND confirmed time..."));
-  }
-}
-
-// GPS polling task - runs in background on Core 1
-void gpsPollingTask(void *parameter) {
-  Serial.println(F("[GPS_TASK] Started on Core 1"));
-
-  // Poll faster at startup to get initial lock quickly
-  unsigned long pollInterval = GPS_STARTUP_POLL_MS;
-
-  for (;;) {
-    pollGpsTime();
-
-    // Once we have valid time, switch to slower polling interval
-    if (isTimeValid()) {
-      pollInterval = GPS_POLL_INTERVAL_MS;
-    } else {
-      pollInterval = GPS_STARTUP_POLL_MS; // Keep polling fast until lock
-    }
-
-    // Wait for next poll (use vTaskDelay for FreeRTOS-friendly delay)
-    vTaskDelay(pdMS_TO_TICKS(pollInterval));
-  }
-}
-
 // Print periodic system status
 void printStatus() {
   Serial.println(F("----------------------------------------"));
@@ -206,12 +146,8 @@ void printStatus() {
     uint32_t seconds = timestampMs / 1000;
     uint32_t ms = timestampMs % 1000;
 
-    // Get SIV with mutex protection
-    byte siv = 0;
-    if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-      siv = myGNSS.getSIV();
-      xSemaphoreGive(i2cMutex);
-    }
+    // Get SIV with thread-safe helper
+    byte siv = getSatellitesInView();
 
     Serial.printf("[STATUS] Time: %lu.%03lu | PPS: %lu | SIV: %d\n", seconds,
                   ms, ppsCount, siv);
@@ -251,20 +187,8 @@ void setup() {
   // Configure PPS output on GPS module
   configureTimePulse();
 
-  // Initialize PPS interrupt
-  initPPS(PPS_PIN);
-
-  // Create GPS polling task on Core 1 with low priority
-  // Priority 1 is lower than default loop() priority (1), so it won't block
-  // Stack size 4KB should be plenty for GPS polling
-  xTaskCreatePinnedToCore(gpsPollingTask, // Task function
-                          "GPS_Poll",     // Task name
-                          4096,           // Stack size (bytes)
-                          NULL,           // Parameters
-                          1, // Priority (low - won't block main loop)
-                          &gpsTaskHandle, // Task handle
-                          1 // Core 1 (same as loop, but lower priority)
-  );
+  // Initialize GPS time subsystem (PPS interrupt + sync task)
+  initGpsTime(&myGNSS, i2cMutex, PPS_PIN);
 
   // Initialize Ethernet
   // NTP server task will be started when we get an IP address
@@ -282,36 +206,25 @@ void setup() {
 
 void loop() {
   // Main loop stays lightweight for fast NTP response
-  // GPS polling is handled by background task
+  // GPS sync is handled by the GPS_Sync task triggered by PPS
 
-  // Check for incoming GPS data (quick, non-blocking)
-  if (xSemaphoreTake(i2cMutex, 0) == pdTRUE) {
-    myGNSS.checkUblox();
-    xSemaphoreGive(i2cMutex);
-  }
-
-  // Handle PPS interrupt - just log for now
+  // Handle PPS interrupt - only log during startup
   if (ppsTriggered) {
     ppsTriggered = false;
 
-    if (isTimeValid()) {
-      uint64_t timestampMs = getAccurateTimestampMs();
-      uint32_t msOffset = timestampMs % 1000;
-      Serial.printf("[PPS] #%lu | Epoch: %lu (latency: %lums)\n", ppsCount,
-                    ppsEpoch, msOffset);
-    } else {
+    if (!isTimeValid()) {
       Serial.printf("[PPS] #%lu | Waiting for time sync...\n", ppsCount);
     }
   }
 
   // Print periodic status
-  if (millis() - lastStatusPrint >= STATUS_PRINT_INTERVAL) {
-    lastStatusPrint = millis();
-    printStatus();
-  }
+  // if (millis() - lastStatusPrint >= STATUS_PRINT_INTERVAL) {
+  //   lastStatusPrint = millis();
+  //   printStatus();
+  // }
 
   // NTP server runs in its own task on Core 0
-  // GPS polling runs in background task on Core 1
+  // GPS sync runs in GPS_Sync task on Core 1
   // Main loop handles PPS events and status reporting
 
   // Minimal delay - just yield to other tasks briefly

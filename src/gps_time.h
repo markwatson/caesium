@@ -2,44 +2,60 @@
 #define GPS_TIME_H
 
 #include <Arduino.h>
+#include <SparkFun_u-blox_GNSS_Arduino_Library.h>
 
 // PPS Pin - GPIO36 is input-only on ESP32, perfect for PPS signal
 #define PPS_PIN 36
 
-// Volatile variables for ISR - shared between ISR and main code
-extern volatile uint32_t ppsEpoch;  // Unix epoch at last PPS (set from GPS)
-extern volatile uint32_t ppsMicros; // micros() captured at last PPS rising edge
-extern volatile bool ppsTriggered;  // Flag set by ISR, cleared by main loop
-extern volatile uint32_t ppsCount;  // Debug counter for PPS pulses
-
-// Time validity flag - only true when GPS time is confirmed
-extern volatile bool hasValidTime;
-
-// Pending epoch - set during GPS poll, applied at next PPS
-extern volatile uint32_t pendingEpoch; // Epoch to apply at next PPS
-extern volatile bool hasPendingSync;   // Flag: pending sync waiting for PPS
-extern volatile bool needsInitialSync; // Flag: true until first sync completes
+// Configuration
+#define GPS_SYNC_INTERVAL_PPS 60    // Sync with GPS every N PPS pulses
+#define GPS_SYNC_DELAY_MS 100       // Delay after PPS before polling GPS
+#define GPS_STARTUP_SYNC_INTERVAL 2 // Sync every N PPS during startup
 
 /**
- * @brief PPS Interrupt Service Routine
- * Called on rising edge of PPS signal. Captures micros() timestamp.
- * Must be placed in IRAM for ESP32.
+ * Time state for NTP serving
+ * Protected by timeStateMux spinlock for cross-core safety.
+ * Use getTimeStateAtomic() to read, or acquire the spinlock directly.
  */
-void IRAM_ATTR ppsISR();
+struct TimeState {
+  uint32_t epochSec;      // Unix epoch at last PPS
+  uint32_t ppsTimeMicros; // micros() captured at last PPS rising edge
+  bool valid;             // True when GPS-synchronized
+};
+
+// Time state - shared between ISR and tasks across both cores
+extern volatile TimeState timeState;
+
+// Spinlock for atomic access to timeState (works across ESP32 cores)
+extern portMUX_TYPE timeStateMux;
+
+// Debug counters (volatile for ISR access)
+extern volatile uint32_t ppsCount; // Total PPS pulses received
+extern volatile bool ppsTriggered; // Flag for main loop debug logging
+
+// Legacy compatibility accessors (use these in main.cpp for debug logging)
+inline uint32_t getPpsEpoch() { return timeState.epochSec; }
+inline uint32_t getPpsMicros() { return timeState.ppsTimeMicros; }
+
+// Macros for legacy code that reads these directly
+#define ppsEpoch (timeState.epochSec)
 
 /**
- * @brief Initialize the PPS interrupt
- * @param pin GPIO pin connected to PPS signal (default PPS_PIN = 36)
+ * @brief Initialize GPS time subsystem
+ * Sets up PPS interrupt and creates GPS sync task.
+ *
+ * @param gnss Pointer to initialized GNSS object
+ * @param i2cMutex Mutex for I2C access (shared with other I2C users)
+ * @param ppsPin GPIO pin connected to PPS signal
  */
-void initPPS(uint8_t pin = PPS_PIN);
+void initGpsTime(SFE_UBLOX_GNSS *gnss, SemaphoreHandle_t i2cMutex,
+                 uint8_t ppsPin = PPS_PIN);
 
 /**
- * @brief Queue GPS epoch for sync at next PPS edge
- * Called when GPS reports valid and confirmed time.
- * The epoch will be applied atomically when next PPS arrives.
- * @param epoch Unix epoch seconds from GPS (corresponds to last PPS)
+ * @brief Check if we have valid GPS-synchronized time
+ * @return true if time has been synchronized from GPS
  */
-void queueTimeSync(uint32_t epoch);
+bool isTimeValid();
 
 /**
  * @brief Get accurate timestamp in milliseconds
@@ -49,9 +65,19 @@ void queueTimeSync(uint32_t epoch);
 uint64_t getAccurateTimestampMs();
 
 /**
- * @brief Check if we have valid GPS-synchronized time
- * @return true if time has been synchronized from GPS with confirmed time
+ * @brief Get time state atomically for NTP
+ * Disables interrupts briefly to get consistent snapshot.
+ * @param state Output: copy of current time state
  */
-bool isTimeValid();
+void getTimeStateAtomic(TimeState &state);
+
+/**
+ * @brief Get satellites in view (thread-safe)
+ * @return Number of satellites, or 0 if unavailable
+ */
+uint8_t getSatellitesInView();
+
+// Legacy API - kept for compatibility during refactor
+void initPPS(uint8_t pin = PPS_PIN);
 
 #endif // GPS_TIME_H

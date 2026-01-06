@@ -15,15 +15,13 @@ const char *getUdpMessage() { return UdpMessage; }
  * to compute sub-second precision.
  */
 void getNtpTimestamp(uint32_t &seconds, uint32_t &fraction) {
-  // Read volatile variables atomically (disable interrupts briefly)
-  portDISABLE_INTERRUPTS();
-  uint32_t epoch = ppsEpoch;
-  uint32_t ppsTime = ppsMicros;
-  portENABLE_INTERRUPTS();
+  // Read time state atomically
+  TimeState state;
+  getTimeStateAtomic(state);
 
   // Calculate elapsed microseconds since last PPS
   uint32_t now = micros();
-  uint32_t elapsedUs = now - ppsTime;
+  uint32_t elapsedUs = now - state.ppsTimeMicros;
 
   // Handle micros() overflow (wraps every ~71 minutes)
   // If elapsed seems huge (> 2 seconds), assume wrap occurred
@@ -36,7 +34,7 @@ void getNtpTimestamp(uint32_t &seconds, uint32_t &fraction) {
   uint32_t remainingUs = elapsedUs % 1000000;
 
   // Convert Unix epoch to NTP epoch (add offset)
-  seconds = epoch + extraSeconds + NTP_UNIX_OFFSET;
+  seconds = state.epochSec + extraSeconds + NTP_UNIX_OFFSET;
 
   // Convert microseconds to NTP fractional seconds
   // NTP fraction = (microseconds / 1,000,000) * 2^32
