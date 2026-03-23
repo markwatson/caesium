@@ -9,7 +9,7 @@
  * Architecture:
  * - PPS ISR: Captures esp_timer_get_time() on rising edge (exact second boundary)
  * - PVT Callback: Fires when GPS sends time data via UART, pairs it with PPS
- * - Core 0: NTP server task (networking)
+ * - NTP: lwIP raw UDP callback in tcpip_thread (no socket/task overhead)
  * - Core 1: Main loop drives checkUblox() to process UART and trigger callbacks
  */
 
@@ -32,9 +32,6 @@ SFE_UBLOX_GNSS myGNSS;
 #define GPS_RX_PIN 36
 #define GPS_BAUD 38400
 
-// Task handle for NTP server
-static TaskHandle_t ntpTaskHandle = NULL;
-
 // Ethernet connection state
 static bool ntpServerStarted = false;
 
@@ -55,18 +52,9 @@ void onEthEvent(arduino_event_id_t event) {
                   ETH.localIP().toString().c_str(), ETH.macAddress().c_str(),
                   ETH.linkSpeed(),
                   ETH.fullDuplex() ? "Full Duplex" : "Half Duplex");
-    // Start NTP server now that network is ready
     if (!ntpServerStarted) {
-      xTaskCreatePinnedToCore(NtpServerTask,  // Task function
-                              "NTP_Server",   // Task name
-                              4096,           // Stack size (bytes)
-                              NULL,           // Parameters
-                              2,              // Priority
-                              &ntpTaskHandle, // Task handle
-                              0               // Core 0 (networking core)
-      );
+      initNtpServer();
       ntpServerStarted = true;
-      Serial.println(F("[NTP] Server task started"));
     }
     break;
 
@@ -163,7 +151,7 @@ void setup() {
   // Initialize PPS interrupt
   initGpsTime(PPS_PIN);
 
-  // Initialize Ethernet
+  // Initialize Ethernet (NTP server starts when we get an IP)
   Serial.println(F("[INIT] Starting Ethernet..."));
   Network.onEvent(onEthEvent);
   ETH.begin();
@@ -190,6 +178,6 @@ void loop() {
     }
   }
 
-  // Yield briefly so NTP task and other FreeRTOS tasks can run
+  // Yield briefly so other FreeRTOS tasks can run
   vTaskDelay(1);
 }

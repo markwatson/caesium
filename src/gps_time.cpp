@@ -20,6 +20,7 @@ volatile TimeState timeState = {0, 0, false};
 portMUX_TYPE timeStateMux = portMUX_INITIALIZER_UNLOCKED;
 
 // PPS interrupt state (written by ISR, consumed by PVT callback)
+// Protected by timeStateMux since ppsTimestampUs is 64-bit (non-atomic on ESP32)
 static volatile int64_t ppsTimestampUs = 0;
 static volatile bool ppsFlag = false;
 
@@ -63,8 +64,12 @@ static uint32_t gpsToEpoch(uint16_t year, uint8_t month, uint8_t day,
  * and sets a flag for the PVT callback to consume.
  */
 void IRAM_ATTR ppsISR() {
-  ppsTimestampUs = esp_timer_get_time();
+  int64_t now = esp_timer_get_time();
+
+  portENTER_CRITICAL_ISR(&timeStateMux);
+  ppsTimestampUs = now;
   ppsFlag = true;
+  portEXIT_CRITICAL_ISR(&timeStateMux);
 
   ppsCount++;
   ppsTriggered = true;
@@ -80,17 +85,19 @@ void IRAM_ATTR ppsISR() {
 void pvtCallback(UBX_NAV_PVT_data_t *pvtData) {
   lastSIV = pvtData->numSV;
 
-  if (!ppsFlag) {
+  // Read PPS state under the same spinlock the ISR writes with
+  portENTER_CRITICAL(&timeStateMux);
+  bool hasPps = ppsFlag;
+  int64_t capturedPpsUs = ppsTimestampUs;
+  portEXIT_CRITICAL(&timeStateMux);
+
+  if (!hasPps) {
     return;
   }
 
   if (!pvtData->valid.bits.validDate || !pvtData->valid.bits.validTime) {
     return;
   }
-
-  // Snapshot the PPS timestamp (written by ISR, safe to read here since
-  // ppsFlag acts as a happens-before indicator and PPS is 1Hz)
-  int64_t capturedPpsUs = ppsTimestampUs;
 
   uint32_t epoch = gpsToEpoch(pvtData->year, pvtData->month, pvtData->day,
                               pvtData->hour, pvtData->min, pvtData->sec);
@@ -99,9 +106,8 @@ void pvtCallback(UBX_NAV_PVT_data_t *pvtData) {
   timeState.epochSec = epoch;
   timeState.ppsTimeMicros = capturedPpsUs;
   timeState.valid = true;
-  portEXIT_CRITICAL(&timeStateMux);
-
   ppsFlag = false;
+  portEXIT_CRITICAL(&timeStateMux);
 }
 
 void initGpsTime(uint8_t ppsPin) {

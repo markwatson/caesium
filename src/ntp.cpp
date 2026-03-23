@@ -1,212 +1,167 @@
+/**
+ * NTP Server — lwIP Raw UDP API
+ *
+ * Uses the lwIP raw API instead of Berkeley sockets. The receive callback
+ * fires directly inside the tcpip_thread the moment UDP parsing completes,
+ * eliminating the mailbox + context-switch jitter of recvfrom().
+ *
+ * Packet lifecycle (old socket API):
+ *   EMAC RX ISR → EMAC task → tcpip_thread → mailbox → scheduler → recvfrom()
+ *   (variable ms of jitter before we timestamp)
+ *
+ * Packet lifecycle (raw API):
+ *   EMAC RX ISR → EMAC task → tcpip_thread → our callback (timestamp here)
+ *   (no mailbox, no context switch, no scheduler delay)
+ */
+
 #include <Arduino.h>
 #include <gps_time.h>
-#include <lwip/netdb.h>
-#include <lwip/sockets.h>
+#include <lwip/pbuf.h>
+#include <lwip/tcpip.h>
+#include <lwip/udp.h>
 #include <ntp.h>
 
-char UdpMessage[UDP_MESSAGE_SIZE] = "NTP server starting...";
-const char *getUdpMessage() { return UdpMessage; }
+static struct udp_pcb *ntpPcb = NULL;
 
 /**
- * @brief Get current time as NTP timestamp
- *
- * NTP timestamps are 64-bit fixed-point: 32 bits seconds since 1900-01-01,
- * 32 bits fractional seconds. Uses the PPS-anchored timeState and
- * esp_timer_get_time() for sub-second interpolation.
+ * Convert a hardware timestamp to NTP format using the given time state.
  */
-void getNtpTimestamp(uint32_t &seconds, uint32_t &fraction) {
-  // Capture hardware time immediately for best accuracy
-  int64_t nowUs = esp_timer_get_time();
-
-  // Read time state atomically
-  TimeState state;
-  getTimeStateAtomic(state);
-
-  // Elapsed microseconds since the PPS pulse that defined state.epochSec
-  int64_t elapsedUs = nowUs - state.ppsTimeMicros;
+static void hwTimeToNtp(int64_t hwTimeUs, const TimeState &state,
+                        uint32_t &seconds, uint32_t &fraction) {
+  int64_t elapsedUs = hwTimeUs - state.ppsTimeMicros;
   if (elapsedUs < 0) {
     elapsedUs = 0;
   }
 
-  // Split into whole seconds and remaining microseconds
   uint32_t extraSeconds = (uint32_t)(elapsedUs / 1000000);
   uint32_t remainingUs = (uint32_t)(elapsedUs % 1000000);
 
-  // Convert Unix epoch to NTP epoch (add offset)
   seconds = state.epochSec + extraSeconds + NTP_UNIX_OFFSET;
-
-  // Convert microseconds to NTP fractional seconds
-  // NTP fraction = (microseconds / 1,000,000) * 2^32
   fraction = ((uint64_t)remainingUs * 4294967296ULL) / 1000000ULL;
 }
 
 /**
- * @brief Handle incoming NTP request and send response
- *
- * @param sock Socket file descriptor
- * @param rxPacket Received NTP packet
- * @param rxLen Length of received data
- * @param clientAddr Client address structure
- * @param addrLen Length of address structure
- * @param rxSeconds Receive timestamp seconds (captured on packet arrival)
- * @param rxFraction Receive timestamp fraction
+ * Raw UDP receive callback — runs directly in tcpip_thread context.
  */
-void handleNtpRequest(int sock, const NtpPacket *rxPacket, int rxLen,
-                      struct sockaddr_in *clientAddr, socklen_t addrLen,
-                      uint32_t rxSeconds, uint32_t rxFraction) {
-
-  // Validate packet size
-  if (rxLen < NTP_PACKET_SIZE) {
-    Serial.printf("NTP: Ignoring short packet (%d bytes)\n", rxLen);
+static void ntpRecvCallback(void *arg, struct udp_pcb *upcb, struct pbuf *p,
+                             const ip_addr_t *addr, u16_t port) {
+  if (p == NULL) {
     return;
   }
 
-  // Extract client's version and mode
+  // TIMESTAMP IMMEDIATELY — we are in tcpip_thread, as close to the wire
+  // as lwIP allows without intercepting at the MAC layer.
+  int64_t rxHwTime = esp_timer_get_time();
+
+  // Read time state once — used for both RX and TX timestamps
+  TimeState state;
+  getTimeStateAtomic(state);
+
+  // Validate packet
+  if (p->len < NTP_PACKET_SIZE) {
+    pbuf_free(p);
+    return;
+  }
+
+  const NtpPacket *rxPacket = (const NtpPacket *)p->payload;
   uint8_t clientVersion = getNtpVersion(rxPacket->li_vn_mode);
   uint8_t clientMode = getNtpMode(rxPacket->li_vn_mode);
 
-  // Only respond to client requests (mode 3)
   if (clientMode != NTP_MODE_CLIENT) {
-    Serial.printf("NTP: Ignoring non-client mode %d\n", clientMode);
+    pbuf_free(p);
     return;
   }
 
-  // Use same NTP version as client (support v3 and v4)
-  if (clientVersion < 3)
-    clientVersion = 3;
-  if (clientVersion > 4)
-    clientVersion = 4;
+  if (clientVersion < 3) clientVersion = 3;
+  if (clientVersion > 4) clientVersion = 4;
 
-  // Build response packet
+  // Compute RX timestamp from the hardware time captured above
+  uint32_t rxSeconds, rxFraction;
+  hwTimeToNtp(rxHwTime, state, rxSeconds, rxFraction);
+
+  // Build response
   NtpPacket txPacket;
   memset(&txPacket, 0, sizeof(txPacket));
 
-  // Check if we have valid GPS time
-  bool timeValid = isTimeValid();
-
-  if (timeValid) {
-    // Normal response - Stratum 1 GPS server
+  if (state.valid) {
     txPacket.li_vn_mode =
         makeNtpFlags(NTP_LI_NONE, clientVersion, NTP_MODE_SERVER);
     txPacket.stratum = NTP_STRATUM_PRIMARY;
   } else {
-    // Unsynchronized - set LI=3 (alarm) and stratum=0
     txPacket.li_vn_mode =
         makeNtpFlags(NTP_LI_ALARM, clientVersion, NTP_MODE_SERVER);
     txPacket.stratum = NTP_STRATUM_UNSPECIFIED;
   }
 
-  // Poll interval (copy from client or use default)
-  txPacket.poll =
-      rxPacket->poll > 0 ? rxPacket->poll : 6; // 2^6 = 64 seconds default
-
-  // Precision: -20 means 2^-20 seconds ≈ 1 microsecond (PPS gives us this)
-  txPacket.precision = -20;
-
-  // Root delay and dispersion (minimal for stratum 1)
+  txPacket.poll = rxPacket->poll > 0 ? rxPacket->poll : 6;
+  txPacket.precision = -20; // 2^-20 ≈ 1µs (PPS precision)
   txPacket.rootDelay = 0;
-  txPacket.rootDispersion = htonl(0x00000100); // ~15ms in NTP fixed-point
+  txPacket.rootDispersion = htonl(0x00000100); // ~15µs
 
-  // Reference ID: "GPS\0" for stratum 1 GPS source
   txPacket.refId[0] = 'G';
   txPacket.refId[1] = 'P';
   txPacket.refId[2] = 'S';
   txPacket.refId[3] = '\0';
 
-  // Reference timestamp: when we last synced to GPS (use receive time as
-  // approx)
-  txPacket.refTimestamp_s = htonl(rxSeconds);
-  txPacket.refTimestamp_f = htonl(rxFraction);
+  // Reference timestamp: last PPS sync time
+  uint32_t refSeconds, refFraction;
+  hwTimeToNtp(state.ppsTimeMicros, state, refSeconds, refFraction);
+  txPacket.refTimestamp_s = htonl(refSeconds);
+  txPacket.refTimestamp_f = htonl(refFraction);
 
-  // Originate timestamp: copy client's transmit timestamp
+  // Originate: copy client's transmit timestamp
   txPacket.origTimestamp_s = rxPacket->txTimestamp_s;
   txPacket.origTimestamp_f = rxPacket->txTimestamp_f;
 
-  // Receive timestamp: when we received the request (already captured)
+  // Receive timestamp
   txPacket.rxTimestamp_s = htonl(rxSeconds);
   txPacket.rxTimestamp_f = htonl(rxFraction);
 
-  // Transmit timestamp: capture as late as possible for accuracy
+  // Save client's transmit timestamp before freeing the incoming pbuf
+  // (addr may point into p, so we must copy before freeing)
+  ip_addr_t clientAddr = *addr;
+  u16_t clientPort = port;
+  pbuf_free(p);
+
+  // Capture TX timestamp as late as possible, right before building the
+  // outgoing pbuf
   uint32_t txSeconds, txFraction;
-  getNtpTimestamp(txSeconds, txFraction);
+  hwTimeToNtp(esp_timer_get_time(), state, txSeconds, txFraction);
   txPacket.txTimestamp_s = htonl(txSeconds);
   txPacket.txTimestamp_f = htonl(txFraction);
 
-  // Send response immediately
-  int err = sendto(sock, &txPacket, sizeof(txPacket), 0,
-                   (struct sockaddr *)clientAddr, addrLen);
-
-  if (err < 0) {
-    Serial.printf("NTP: sendto failed: errno %d\n", errno);
-  } else {
-    // Update status message
-    char *clientIp = inet_ntoa(clientAddr->sin_addr);
-    snprintf(UdpMessage, sizeof(UdpMessage), "NTP: Responded to %s (v%d, %s)",
-             clientIp, clientVersion, timeValid ? "synced" : "UNSYNC");
+  // Allocate and send response
+  struct pbuf *pOut = pbuf_alloc(PBUF_TRANSPORT, sizeof(NtpPacket), PBUF_RAM);
+  if (pOut != NULL) {
+    memcpy(pOut->payload, &txPacket, sizeof(NtpPacket));
+    udp_sendto(upcb, pOut, &clientAddr, clientPort);
+    pbuf_free(pOut);
   }
 }
 
-void NtpServerTask(void *pvParameters) {
-  // Create UDP socket
-  int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-  if (sock < 0) {
-    Serial.printf("NTP: Unable to create socket: errno %d\n", errno);
-    snprintf(UdpMessage, sizeof(UdpMessage), "NTP: Socket creation failed");
-    vTaskDelete(NULL);
+void initNtpServer() {
+  // Raw lwIP API must be called with the tcpip core lock held
+  // when called from outside the tcpip_thread context.
+  LOCK_TCPIP_CORE();
+
+  ntpPcb = udp_new();
+  if (ntpPcb == NULL) {
+    UNLOCK_TCPIP_CORE();
+    Serial.println(F("[NTP] ERROR: udp_new() failed"));
     return;
   }
 
-  // Allow address reuse (helpful for development/restarts)
-  int optval = 1;
-  setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-
-  // Bind to NTP port 123
-  struct sockaddr_in serverAddr;
-  serverAddr.sin_addr.s_addr = htonl(INADDR_ANY);
-  serverAddr.sin_family = AF_INET;
-  serverAddr.sin_port = htons(NTP_PORT);
-
-  int err = bind(sock, (struct sockaddr *)&serverAddr, sizeof(serverAddr));
-  if (err < 0) {
-    Serial.printf("NTP: Bind to port %d failed: errno %d\n", NTP_PORT, errno);
-    snprintf(UdpMessage, sizeof(UdpMessage), "NTP: Bind failed (port %d)",
-             NTP_PORT);
-    close(sock);
-    vTaskDelete(NULL);
+  err_t err = udp_bind(ntpPcb, IP_ADDR_ANY, NTP_PORT);
+  if (err != ERR_OK) {
+    udp_remove(ntpPcb);
+    ntpPcb = NULL;
+    UNLOCK_TCPIP_CORE();
+    Serial.printf("[NTP] ERROR: udp_bind failed: %d\n", err);
     return;
   }
 
-  Serial.printf("NTP Server listening on port %d\n", NTP_PORT);
-  snprintf(UdpMessage, sizeof(UdpMessage), "NTP: Listening on port %d",
-           NTP_PORT);
+  udp_recv(ntpPcb, ntpRecvCallback, NULL);
+  UNLOCK_TCPIP_CORE();
 
-  // Receive buffer
-  uint8_t rxBuffer[NTP_PACKET_SIZE + 16]; // Slightly larger for safety
-
-  // Main server loop
-  while (true) {
-    struct sockaddr_in clientAddr;
-    socklen_t addrLen = sizeof(clientAddr);
-
-    // BLOCKING: Wait for incoming packet
-    int rxLen = recvfrom(sock, rxBuffer, sizeof(rxBuffer), 0,
-                         (struct sockaddr *)&clientAddr, &addrLen);
-
-    // Capture receive timestamp IMMEDIATELY for best accuracy
-    uint32_t rxSeconds, rxFraction;
-    getNtpTimestamp(rxSeconds, rxFraction);
-
-    if (rxLen < 0) {
-      Serial.printf("NTP: recvfrom failed: errno %d\n", errno);
-      continue; // Keep trying
-    }
-
-    // Handle the NTP request
-    handleNtpRequest(sock, (NtpPacket *)rxBuffer, rxLen, &clientAddr, addrLen,
-                     rxSeconds, rxFraction);
-  }
-
-  // Cleanup (never reached in normal operation)
-  close(sock);
-  vTaskDelete(NULL);
+  Serial.printf("[NTP] Server listening on port %d (raw UDP API)\n", NTP_PORT);
 }
