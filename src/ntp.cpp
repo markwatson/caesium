@@ -1,5 +1,5 @@
 /**
- * NTP Server — lwIP Raw UDP API
+ * NTP Server — lwIP Raw UDP API (RFC 5905)
  *
  * Uses the lwIP raw API instead of Berkeley sockets. The receive callback
  * fires directly inside the tcpip_thread the moment UDP parsing completes,
@@ -23,6 +23,9 @@
 
 static struct udp_pcb *ntpPcb = NULL;
 
+// NTP short format (16.16 fixed point) for MAXDISP = 16 seconds (RFC 5905 §6)
+#define NTP_MAXDISP_SHORT (16 << 16)
+
 /**
  * Convert a hardware timestamp to NTP format using the given time state.
  */
@@ -42,6 +45,10 @@ static void hwTimeToNtp(int64_t hwTimeUs, const TimeState &state,
 
 /**
  * Raw UDP receive callback — runs directly in tcpip_thread context.
+ *
+ * Per RFC 5905 §7.3 (fast_xmit), a server always responds to unicast
+ * client requests, even when unsynchronized. The client checks LI/stratum
+ * and discards unsynchronized responses on its own.
  */
 static void ntpRecvCallback(void *arg, struct udp_pcb *upcb, struct pbuf *p,
                              const ip_addr_t *addr, u16_t port) {
@@ -75,60 +82,77 @@ static void ntpRecvCallback(void *arg, struct udp_pcb *upcb, struct pbuf *p,
   if (clientVersion < 3) clientVersion = 3;
   if (clientVersion > 4) clientVersion = 4;
 
-  // Compute RX timestamp from the hardware time captured above
-  uint32_t rxSeconds, rxFraction;
-  hwTimeToNtp(rxHwTime, state, rxSeconds, rxFraction);
-
-  // Build response
+  // Build response packet
   NtpPacket txPacket;
   memset(&txPacket, 0, sizeof(txPacket));
 
-  if (state.valid) {
-    txPacket.li_vn_mode =
-        makeNtpFlags(NTP_LI_NONE, clientVersion, NTP_MODE_SERVER);
-    txPacket.stratum = NTP_STRATUM_PRIMARY;
-  } else {
-    txPacket.li_vn_mode =
-        makeNtpFlags(NTP_LI_ALARM, clientVersion, NTP_MODE_SERVER);
-    txPacket.stratum = NTP_STRATUM_UNSPECIFIED;
-  }
+  // Originate: copy client's transmit timestamp (RFC 5905: x.org = r.xmt)
+  txPacket.origTimestamp_s = rxPacket->txTimestamp_s;
+  txPacket.origTimestamp_f = rxPacket->txTimestamp_f;
 
-  txPacket.poll = rxPacket->poll > 0 ? rxPacket->poll : 6;
-  txPacket.precision = -20; // 2^-20 ≈ 1µs (PPS precision)
-  txPacket.rootDelay = 0;
-  txPacket.rootDispersion = htonl(0x00000100); // ~15µs
+  // Copy addr before freeing pbuf (addr may point into p)
+  ip_addr_t clientAddr = *addr;
+  u16_t clientPort = port;
+  pbuf_free(p);
 
+  // Poll: copy from client (RFC 5905: x.poll = r.poll)
+  txPacket.poll = rxPacket->poll;
+
+  // Precision: 2^-20 ≈ 1µs (esp_timer_get_time resolution + PPS ISR latency)
+  txPacket.precision = -20;
+
+  // Reference ID: "GPS" for stratum 1 GPS source (RFC 5905 Figure 12)
   txPacket.refId[0] = 'G';
   txPacket.refId[1] = 'P';
   txPacket.refId[2] = 'S';
   txPacket.refId[3] = '\0';
 
-  // Reference timestamp: last PPS sync time
-  uint32_t refSeconds, refFraction;
-  hwTimeToNtp(state.ppsTimeMicros, state, refSeconds, refFraction);
-  txPacket.refTimestamp_s = htonl(refSeconds);
-  txPacket.refTimestamp_f = htonl(refFraction);
+  // Root delay: 0 for a primary server directly connected to GPS
+  txPacket.rootDelay = 0;
 
-  // Originate: copy client's transmit timestamp
-  txPacket.origTimestamp_s = rxPacket->txTimestamp_s;
-  txPacket.origTimestamp_f = rxPacket->txTimestamp_f;
+  if (state.valid) {
+    // SYNCHRONIZED — Stratum 1 GPS server
+    txPacket.li_vn_mode =
+        makeNtpFlags(NTP_LI_NONE, clientVersion, NTP_MODE_SERVER);
+    txPacket.stratum = NTP_STRATUM_PRIMARY;
 
-  // Receive timestamp
-  txPacket.rxTimestamp_s = htonl(rxSeconds);
-  txPacket.rxTimestamp_f = htonl(rxFraction);
+    // Root dispersion: grows at PHI (15 ppm) since last PPS sync.
+    // We sync every second, so worst case is ~15µs. Use a conservative
+    // floor of ~30µs (NTP short format 0x00000002) to account for ISR
+    // jitter and oscillator tolerance.
+    uint32_t sinceSyncUs = (uint32_t)((rxHwTime - state.ppsTimeMicros) & 0x7FFFFFFF);
+    // PHI = 15e-6 s/s. In NTP short format: us * 15 * 65536 / 1e12
+    // Simplified: us / 1017033. Add floor of 2 (~30µs).
+    uint32_t rootDisp = sinceSyncUs / 1017033 + 2;
+    txPacket.rootDispersion = htonl(rootDisp);
 
-  // Save client's transmit timestamp before freeing the incoming pbuf
-  // (addr may point into p, so we must copy before freeing)
-  ip_addr_t clientAddr = *addr;
-  u16_t clientPort = port;
-  pbuf_free(p);
+    // Reference timestamp: time of last PPS sync (RFC 5905: s.reftime)
+    uint32_t refSeconds, refFraction;
+    hwTimeToNtp(state.ppsTimeMicros, state, refSeconds, refFraction);
+    txPacket.refTimestamp_s = htonl(refSeconds);
+    txPacket.refTimestamp_f = htonl(refFraction);
 
-  // Capture TX timestamp as late as possible, right before building the
-  // outgoing pbuf
-  uint32_t txSeconds, txFraction;
-  hwTimeToNtp(esp_timer_get_time(), state, txSeconds, txFraction);
-  txPacket.txTimestamp_s = htonl(txSeconds);
-  txPacket.txTimestamp_f = htonl(txFraction);
+    // Receive timestamp: when we received the request
+    uint32_t rxSeconds, rxFraction;
+    hwTimeToNtp(rxHwTime, state, rxSeconds, rxFraction);
+    txPacket.rxTimestamp_s = htonl(rxSeconds);
+    txPacket.rxTimestamp_f = htonl(rxFraction);
+
+    // Transmit timestamp: capture as late as possible
+    uint32_t txSeconds, txFraction;
+    hwTimeToNtp(esp_timer_get_time(), state, txSeconds, txFraction);
+    txPacket.txTimestamp_s = htonl(txSeconds);
+    txPacket.txTimestamp_f = htonl(txFraction);
+  } else {
+    // UNSYNCHRONIZED — LI=3 (NOSYNC), stratum=0 (RFC 5905 §7.3)
+    // Timestamps are zero ("unknown", RFC 5905 §6). Client will see
+    // LI=3/stratum=0 and discard. We still respond per RFC.
+    txPacket.li_vn_mode =
+        makeNtpFlags(NTP_LI_ALARM, clientVersion, NTP_MODE_SERVER);
+    txPacket.stratum = NTP_STRATUM_UNSPECIFIED;
+    txPacket.rootDispersion = htonl(NTP_MAXDISP_SHORT);
+    // All timestamp fields remain zero from memset
+  }
 
   // Allocate and send response
   struct pbuf *pOut = pbuf_alloc(PBUF_TRANSPORT, sizeof(NtpPacket), PBUF_RAM);

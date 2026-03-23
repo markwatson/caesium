@@ -28,9 +28,6 @@ static volatile bool ppsFlag = false;
 volatile uint32_t ppsCount = 0;
 volatile bool ppsTriggered = false;
 
-// Cached SIV from latest PVT message
-static volatile uint8_t lastSIV = 0;
-
 // Convert GPS date/time fields directly to Unix epoch.
 // Avoids mktime() which depends on the C library's timezone state.
 static uint32_t gpsToEpoch(uint16_t year, uint8_t month, uint8_t day,
@@ -83,8 +80,6 @@ void IRAM_ATTR ppsISR() {
  * the PPS pulse. The PVT data describes the time of that pulse.
  */
 void pvtCallback(UBX_NAV_PVT_data_t *pvtData) {
-  lastSIV = pvtData->numSV;
-
   // Read PPS state under the same spinlock the ISR writes with
   portENTER_CRITICAL(&timeStateMux);
   bool hasPps = ppsFlag;
@@ -131,17 +126,3 @@ void getTimeStateAtomic(TimeState &state) {
   portEXIT_CRITICAL(&timeStateMux);
 }
 
-uint64_t getAccurateTimestampMs() {
-  TimeState state;
-  getTimeStateAtomic(state);
-
-  int64_t nowUs = esp_timer_get_time();
-  int64_t elapsedUs = nowUs - state.ppsTimeMicros;
-  if (elapsedUs < 0) {
-    elapsedUs = 0;
-  }
-
-  return (uint64_t)state.epochSec * 1000ULL + (uint64_t)(elapsedUs / 1000);
-}
-
-uint8_t getLastSIV() { return lastSIV; }

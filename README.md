@@ -4,22 +4,30 @@ Homebrew Stratum-1 NTP server using an ESP32-PoE-ISO and SparkFun NEO-M9N GPS mo
 
 ## Features
 
-- Stratum-1 NTP server using GPS + PPS for accurate time
-- UDP NTP server (port 123) implemented using lwIP sockets
-- Ethernet connectivity with mDNS advertising as `caesium.local`
-- Lightweight dual-core design: GPS polling and PPS handling on Core 1, NTP server on Core 0
+- Stratum-1 NTP server using GPS PPS for microsecond-accurate timekeeping
+- lwIP raw UDP API for low-jitter NTP response (no socket/task overhead)
+- Push/callback GPS architecture: PPS ISR captures the second boundary, UBX-NAV-PVT callback identifies which second
+- Ethernet connectivity with mDNS (`caesium.local`)
 
 ## Hardware
 
-- **ESP32-PoE-ISO** (Olimex) or equivalent ESP32 board with Ethernet
-- **SparkFun NEO-M9N** GPS module (I2C) with PPS output wired to GPIO36
+- **ESP32-PoE-ISO** (Olimex) — dual-core ESP32 with built-in Ethernet (LAN8720 PHY)
+- **SparkFun NEO-M9N** GPS module connected via UART
+
+### Pin Assignments
+
+| Function | GPIO | Notes |
+|----------|------|-------|
+| GPS TX (ESP32 → GPS RX) | 4 | UART1 TX |
+| GPS RX (GPS TX → ESP32) | 36 | UART1 RX (input-only pin) |
+| PPS | 16 | Rising edge = top of second |
 
 ## Building
 
-Requires [PlatformIO](https://platformio.org/) 🇺🇦.
+Requires [PlatformIO](https://platformio.org/).
 
 ```bash
-~/.platformio/penv/bin/pio run
+pio run
 ```
 
 ## Usage
@@ -27,26 +35,42 @@ Requires [PlatformIO](https://platformio.org/) 🇺🇦.
 The device advertises itself via mDNS as `caesium.local`. Test with the included Python scripts:
 
 ```bash
-# Single NTP query test
+# Single NTP query
 python3 test_ntp.py caesium.local
 
-# Continuous monitoring with statistics
-python3 test_stability.py caesium.local
+# Stability test (60 samples, 1/sec)
+python3 test_ntp_stability.py caesium.local --count 60 --interval 1
 ```
 
-You can also use standard tools like `sntp`:
+Or with standard tools:
 
 ```bash
 sntp caesium.local
 ```
 
+## Architecture
+
+```
+PPS rising edge (GPIO16)
+  → ISR captures esp_timer_get_time(), sets flag
+
+~34ms later, GPS sends UBX-NAV-PVT over UART
+  → checkUblox() assembles packet
+  → checkCallbacks() fires pvtCallback()
+  → Callback pairs PPS timestamp with GPS epoch under spinlock
+
+NTP request arrives over Ethernet
+  → lwIP raw UDP callback fires in tcpip_thread
+  → Timestamps immediately via esp_timer_get_time()
+  → Reads timeState under spinlock
+  → Computes NTP response and sends via udp_sendto()
+```
+
 ## Notes
 
-- The server reports Stratum 1 when GPS is locked; unsynchronized (`LI=3`) otherwise
-- Without hardware packet timestamping, expect tens of milliseconds of offset/jitter
-- Local NTP clients (chrony/ntpd) will converge and discipline the system clock
-- `test_ntp.py` prints round-trip delay and clock offset estimates
-- `test_stability.py` monitors continuously and collects statistics over time
+- Reports Stratum 1 when GPS is locked; unsynchronized (LI=3) otherwise
+- Without hardware MAC-layer timestamping, expect ~1-3ms offset on wired LAN
+- GPS UART runs at 38400 baud (NEO-M9N default), UBX protocol only
 
 ## License
 
@@ -54,5 +78,4 @@ MIT (see [LICENSE](LICENSE))
 
 ## Dependencies
 
-- [OLIMEX ESP32-POE-ISO](https://github.com/OLIMEX/ESP32-POE-ISO)
 - [SparkFun u-blox GNSS Arduino Library](https://github.com/sparkfun/SparkFun_u-blox_GNSS_Arduino_Library)

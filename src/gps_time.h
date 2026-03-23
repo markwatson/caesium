@@ -19,7 +19,7 @@ struct TimeState {
   bool valid;            // True once PPS + GPS time have been paired
 };
 
-// Time state - shared between PVT callback (Core 1) and NTP task (Core 0)
+// Time state - shared between PVT callback (Core 1) and NTP callback (Core 0)
 extern volatile TimeState timeState;
 
 // Spinlock for atomic access to timeState (works across ESP32 cores)
@@ -31,7 +31,7 @@ extern volatile bool ppsTriggered;
 
 /**
  * PVT callback - registered with the SparkFun library via setAutoPVTcallbackPtr.
- * Called from checkUblox() when a complete UBX-NAV-PVT packet arrives.
+ * Called from checkCallbacks() when a complete UBX-NAV-PVT packet arrives.
  * Pairs the most recent PPS timestamp with the GPS time data.
  */
 void pvtCallback(UBX_NAV_PVT_data_t *pvtData);
@@ -48,19 +48,9 @@ void initGpsTime(uint8_t ppsPin = PPS_PIN);
 bool isTimeValid();
 
 /**
- * Get accurate timestamp in milliseconds (epoch + sub-second from PPS).
- */
-uint64_t getAccurateTimestampMs();
-
-/**
  * Get time state atomically for NTP.
  * Briefly disables interrupts for a consistent snapshot.
  */
 void getTimeStateAtomic(TimeState &state);
-
-/**
- * Get last known satellite count (from most recent PVT message).
- */
-uint8_t getLastSIV();
 
 #endif // GPS_TIME_H
