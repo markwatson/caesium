@@ -116,7 +116,22 @@ void initGpsTime(uint8_t ppsPin) {
   Serial.printf("[GPS_TIME] PPS interrupt attached to pin %d\n", ppsPin);
 }
 
-bool isTimeValid() { return timeState.valid; }
+/**
+ * Check staleness: if the last PPS+PVT sync is older than the timeout,
+ * the time is no longer trustworthy.
+ */
+static bool isTimeFresh(int64_t ppsTimeMicros) {
+  if (ppsTimeMicros == 0) {
+    return false; // Never synced
+  }
+  int64_t age = esp_timer_get_time() - ppsTimeMicros;
+  return age >= 0 && age < GPS_STALE_TIMEOUT_US;
+}
+
+bool isTimeValid() {
+  // Quick check without full spinlock — used for debug logging only
+  return timeState.valid && isTimeFresh(timeState.ppsTimeMicros);
+}
 
 void getTimeStateAtomic(TimeState &state) {
   portENTER_CRITICAL(&timeStateMux);
@@ -124,5 +139,10 @@ void getTimeStateAtomic(TimeState &state) {
   state.ppsTimeMicros = timeState.ppsTimeMicros;
   state.valid = timeState.valid;
   portEXIT_CRITICAL(&timeStateMux);
+
+  // Override valid if the sync is stale
+  if (state.valid && !isTimeFresh(state.ppsTimeMicros)) {
+    state.valid = false;
+  }
 }
 

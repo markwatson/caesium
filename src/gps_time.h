@@ -7,6 +7,10 @@
 // PPS Pin - GPIO16 on ESP32-PoE-ISO
 #define PPS_PIN 16
 
+// If no PPS+PVT sync for this many microseconds, report unsynchronized.
+// At 20-40 ppm crystal drift, 5 seconds accumulates ~100-200µs of error.
+#define GPS_STALE_TIMEOUT_US 5000000
+
 /**
  * Time state for NTP serving
  *
