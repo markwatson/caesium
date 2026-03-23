@@ -11,35 +11,32 @@ const char *getUdpMessage() { return UdpMessage; }
  * @brief Get current time as NTP timestamp
  *
  * NTP timestamps are 64-bit fixed-point: 32 bits seconds since 1900-01-01,
- * 32 bits fractional seconds. We use ppsEpoch (Unix seconds) and ppsMicros
- * to compute sub-second precision.
+ * 32 bits fractional seconds. Uses the PPS-anchored timeState and
+ * esp_timer_get_time() for sub-second interpolation.
  */
 void getNtpTimestamp(uint32_t &seconds, uint32_t &fraction) {
+  // Capture hardware time immediately for best accuracy
+  int64_t nowUs = esp_timer_get_time();
+
   // Read time state atomically
   TimeState state;
   getTimeStateAtomic(state);
 
-  // Calculate elapsed microseconds since last PPS
-  uint32_t now = micros();
-  uint32_t elapsedUs = now - state.ppsTimeMicros;
-
-  // Handle micros() overflow (wraps every ~71 minutes)
-  // If elapsed seems huge (> 2 seconds), assume wrap occurred
-  if (elapsedUs > 2000000) {
-    elapsedUs = 0; // Fallback to PPS boundary
+  // Elapsed microseconds since the PPS pulse that defined state.epochSec
+  int64_t elapsedUs = nowUs - state.ppsTimeMicros;
+  if (elapsedUs < 0) {
+    elapsedUs = 0;
   }
 
-  // If we've crossed a second boundary, adjust
-  uint32_t extraSeconds = elapsedUs / 1000000;
-  uint32_t remainingUs = elapsedUs % 1000000;
+  // Split into whole seconds and remaining microseconds
+  uint32_t extraSeconds = (uint32_t)(elapsedUs / 1000000);
+  uint32_t remainingUs = (uint32_t)(elapsedUs % 1000000);
 
   // Convert Unix epoch to NTP epoch (add offset)
   seconds = state.epochSec + extraSeconds + NTP_UNIX_OFFSET;
 
   // Convert microseconds to NTP fractional seconds
   // NTP fraction = (microseconds / 1,000,000) * 2^32
-  // = microseconds * 4294.967296
-  // Approximate: (us * 4295) - (us / 8) for better precision without float
   fraction = ((uint64_t)remainingUs * 4294967296ULL) / 1000000ULL;
 }
 

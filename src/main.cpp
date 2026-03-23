@@ -2,23 +2,19 @@
  * Caesium - GPS-disciplined NTP Time Server
  *
  * This firmware implements a precise time source using:
- * - SparkFun NEO-M9N GPS module for time reference
+ * - SparkFun NEO-M9N GPS module for time reference (via UART)
  * - PPS (Pulse Per Second) interrupt for microsecond accuracy
  * - ESP32-PoE-ISO (Olimex) as the microcontroller
  *
  * Architecture:
- * - Core 0: Reserved for networking (ETH/WiFi stack)
- * - Core 1: Application code (main loop + GPS polling task)
- * - PPS ISR: Hardware interrupt captures exact second boundary
- *
- * The GPS polling runs as a low-priority background task so it won't
- * block the main loop. This ensures NTP responses can be handled quickly
- * even while GPS I2C communication is in progress.
+ * - PPS ISR: Captures esp_timer_get_time() on rising edge (exact second boundary)
+ * - PVT Callback: Fires when GPS sends time data via UART, pairs it with PPS
+ * - Core 0: NTP server task (networking)
+ * - Core 1: Main loop drives checkUblox() to process UART and trigger callbacks
  */
 
 #include <ESPmDNS.h>
 #include <ETH.h>
-#include <Wire.h>
 
 #include "SparkFun_u-blox_GNSS_Arduino_Library.h"
 #include "gps_time.h"
@@ -30,26 +26,20 @@ const char HOSTNAME[] = "caesium";
 // GPS module instance
 SFE_UBLOX_GNSS myGNSS;
 
-// I2C pins for GNSS module
-#define GPS_SDA_PIN 33
-#define GPS_SCL_PIN 32
-
-// Status print interval
-const unsigned long STATUS_PRINT_INTERVAL = 5000;
-unsigned long lastStatusPrint = 0;
-
-// Mutex for I2C access (GPS library isn't thread-safe)
-SemaphoreHandle_t i2cMutex = NULL;
+// UART pins for GNSS module (ESP32-PoE-ISO Serial1)
+// TX1=GPIO4 (ESP32 TX -> GNSS RX), RX1=GPIO36 (GNSS TX -> ESP32 RX)
+#define GPS_TX_PIN 4
+#define GPS_RX_PIN 36
+#define GPS_BAUD 38400
 
 // Task handle for NTP server
-TaskHandle_t ntpTaskHandle = NULL;
+static TaskHandle_t ntpTaskHandle = NULL;
 
 // Ethernet connection state
-static bool ethConnected = false;
 static bool ntpServerStarted = false;
 
 // Ethernet event handler
-void onEthEvent(WiFiEvent_t event) {
+void onEthEvent(arduino_event_id_t event) {
   switch (event) {
   case ARDUINO_EVENT_ETH_START:
     Serial.println(F("[ETH] Started"));
@@ -65,8 +55,6 @@ void onEthEvent(WiFiEvent_t event) {
                   ETH.localIP().toString().c_str(), ETH.macAddress().c_str(),
                   ETH.linkSpeed(),
                   ETH.fullDuplex() ? "Full Duplex" : "Half Duplex");
-    ethConnected = true;
-
     // Start NTP server now that network is ready
     if (!ntpServerStarted) {
       xTaskCreatePinnedToCore(NtpServerTask,  // Task function
@@ -84,12 +72,10 @@ void onEthEvent(WiFiEvent_t event) {
 
   case ARDUINO_EVENT_ETH_DISCONNECTED:
     Serial.println(F("[ETH] Disconnected"));
-    ethConnected = false;
     break;
 
   case ARDUINO_EVENT_ETH_STOP:
     Serial.println(F("[ETH] Stopped"));
-    ethConnected = false;
     break;
 
   default:
@@ -137,25 +123,6 @@ void configureTimePulse() {
   }
 }
 
-// Print periodic system status
-void printStatus() {
-  Serial.println(F("----------------------------------------"));
-
-  if (isTimeValid()) {
-    uint64_t timestampMs = getAccurateTimestampMs();
-    uint32_t seconds = timestampMs / 1000;
-    uint32_t ms = timestampMs % 1000;
-
-    // Get SIV with thread-safe helper
-    byte siv = getSatellitesInView();
-
-    Serial.printf("[STATUS] Time: %lu.%03lu | PPS: %lu | SIV: %d\n", seconds,
-                  ms, ppsCount, siv);
-  } else {
-    Serial.printf("[STATUS] Waiting for GPS lock... | PPS: %lu\n", ppsCount);
-  }
-}
-
 void setup() {
   delay(500); // Wait for hardware to stabilize
 
@@ -164,51 +131,57 @@ void setup() {
   Serial.println(F("       Caesium GPS Time Server"));
   Serial.println(F("========================================\n"));
 
-  // Create I2C mutex before any I2C operations
-  i2cMutex = xSemaphoreCreateMutex();
-  if (i2cMutex == NULL) {
-    Serial.println(F("[INIT] ERROR: Failed to create I2C mutex!"));
-    while (1)
-      delay(1000);
-  }
-
-  // Initialize GPS via I2C
-  Serial.println(F("[INIT] Starting I2C..."));
-  Wire.begin(GPS_SDA_PIN, GPS_SCL_PIN);
+  // Initialize GPS via UART (Serial1)
+  Serial.println(F("[INIT] Starting GNSS UART..."));
+  Serial1.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
 
   Serial.println(F("[INIT] Connecting to GPS module..."));
-  if (!myGNSS.begin()) {
+  if (!myGNSS.begin(Serial1)) {
     Serial.println(F("[INIT] ERROR: GPS module not detected! Check wiring."));
     while (1)
       delay(1000);
   }
-  Serial.println(F("[INIT] GPS module connected"));
+  Serial.println(F("[INIT] GPS module connected via UART"));
+
+  // Configure UART port for UBX protocol only (disable NMEA for efficiency)
+  myGNSS.setUART1Output(COM_TYPE_UBX);
+
+  // Set navigation rate to 1Hz (one PVT message per PPS pulse)
+  myGNSS.setNavigationFrequency(1);
+
+  // Register PVT callback — the library calls this when a complete,
+  // checksum-verified UBX-NAV-PVT packet has been assembled from UART
+  if (myGNSS.setAutoPVTcallbackPtr(&pvtCallback)) {
+    Serial.println(F("[INIT] PVT callback registered"));
+  } else {
+    Serial.println(F("[INIT] WARNING: setAutoPVTcallbackPtr failed!"));
+  }
 
   // Configure PPS output on GPS module
   configureTimePulse();
 
-  // Initialize GPS time subsystem (PPS interrupt + sync task)
-  initGpsTime(&myGNSS, i2cMutex, PPS_PIN);
+  // Initialize PPS interrupt
+  initGpsTime(PPS_PIN);
 
   // Initialize Ethernet
-  // NTP server task will be started when we get an IP address
   Serial.println(F("[INIT] Starting Ethernet..."));
-  WiFi.onEvent(onEthEvent);
+  Network.onEvent(onEthEvent);
   ETH.begin();
-  // multicast DNS (mDNS) allows to resolve hostnames to IP addresses without a
-  // DNS server
+
   if (MDNS.begin(HOSTNAME)) {
     Serial.printf("MDNS responder started, listening on %s.local\n", HOSTNAME);
   }
 
-  Serial.println(F("[INIT] Setup complete - waiting for network...\n"));
+  Serial.println(F("[INIT] Setup complete\n"));
 }
 
 void loop() {
-  // Main loop stays lightweight for fast NTP response
-  // GPS sync is handled by the GPS_Sync task triggered by PPS
+  // Drive the SparkFun library: read UART bytes and assemble packets,
+  // then fire any pending callbacks (e.g. pvtCallback).
+  myGNSS.checkUblox();
+  myGNSS.checkCallbacks();
 
-  // Handle PPS interrupt - only log during startup
+  // Log PPS during startup (before time is valid)
   if (ppsTriggered) {
     ppsTriggered = false;
 
@@ -217,16 +190,6 @@ void loop() {
     }
   }
 
-  // Print periodic status
-  // if (millis() - lastStatusPrint >= STATUS_PRINT_INTERVAL) {
-  //   lastStatusPrint = millis();
-  //   printStatus();
-  // }
-
-  // NTP server runs in its own task on Core 0
-  // GPS sync runs in GPS_Sync task on Core 1
-  // Main loop handles PPS events and status reporting
-
-  // Minimal delay - just yield to other tasks briefly
+  // Yield briefly so NTP task and other FreeRTOS tasks can run
   vTaskDelay(1);
 }

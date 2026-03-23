@@ -6,3 +6,4 @@
 pkg/
 *.log
 *.tmp
+.claude/settings.local.json
