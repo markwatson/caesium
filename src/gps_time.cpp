@@ -90,6 +90,18 @@ void pvtCallback(UBX_NAV_PVT_data_t *pvtData) {
     return;
   }
 
+  // Guard: PVT should arrive within ~80ms of PPS. If the PPS timestamp
+  // is >500ms old, a second PPS has likely fired and overwritten the
+  // original — pairing this PVT with it would be off by a full second.
+  int64_t ppsAge = esp_timer_get_time() - capturedPpsUs;
+  if (ppsAge > 500000) {
+    // Stale PPS — clear the flag and discard
+    portENTER_CRITICAL(&timeStateMux);
+    ppsFlag = false;
+    portEXIT_CRITICAL(&timeStateMux);
+    return;
+  }
+
   if (!pvtData->valid.bits.validDate || !pvtData->valid.bits.validTime) {
     return;
   }
