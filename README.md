@@ -76,6 +76,10 @@ Hourly (in post-sync UART idle window)
   → Sets NTP leap indicator (LI=1 insert / LI=2 delete)
 ```
 
+## Long-term Testing
+
+See [TESTING.md](TESTING.md) for how to evaluate Caesium against public NTP servers using chrony on a Linux client. Includes chrony configuration, multi-day data collection, and an analysis script (`analyze_chrony.py`) that parses chrony logs and generates a comparison report.
+
 ## Notes
 
 - Reports Stratum 1 when GPS is locked; unsynchronized (LI=3) if no sync for >5 seconds
