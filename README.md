@@ -1,6 +1,10 @@
 # Caesium — GPS-Disciplined NTP Time Server
 
+> **Disclaimer:** This is a hobby/learning project. It works well enough for home lab use, but has not been rigorously validated for production or safety-critical timekeeping. There may be bugs.
+
 Homebrew Stratum-1 NTP server using an ESP32-PoE-ISO and SparkFun NEO-M9N GPS module.
+
+I built this because I got bored and wanted to try to build an accurate NTP server for using on my local network. There are probably some valid use cases for this such as machines needing higher accurate time than can be provided over the network. I didn't really have a good use case other than that it seemed cool to build a stratum 1 time server.
 
 ## Features
 
@@ -14,20 +18,28 @@ Homebrew Stratum-1 NTP server using an ESP32-PoE-ISO and SparkFun NEO-M9N GPS mo
 
 ## Hardware
 
-- **ESP32-PoE-ISO** (Olimex) — dual-core ESP32 with built-in Ethernet (LAN8720 PHY)
-- **SparkFun NEO-M9N** GPS module connected via UART
+### Bill of Materials
 
-### Pin Assignments
+| Part | Notes |
+|------|-------|
+| [Olimex ESP32-PoE-ISO](https://www.olimex.com/Products/IoT/ESP32/ESP32-POE-ISO/open-source-hardware) | ESP32 with hardware Ethernet (LAN8720 PHY). May work on other ESP32 boards but wired Ethernet is important for low-jitter NTP. |
+| [SparkFun NEO-M9N GPS Breakout (SMA)](https://www.sparkfun.com/sparkfun-gps-breakout-neo-m9n-sma-qwiic.html) | u-blox NEO-M9N with PPS output. Other SparkFun u-blox breakouts likely work with minor code changes. |
+| [GPS Antenna (SMA)](https://www.adafruit.com/product/960) | Any active or passive GPS antenna with SMA connector. |
+| Steel plate / ground plane | Improves GPS antenna reception. A metal shelf or mounting plate works. |
 
-| Function | GPIO | Notes |
-|----------|------|-------|
-| GPS TX (ESP32 → GPS RX) | 4 | UART1 TX |
-| GPS RX (GPS TX → ESP32) | 36 | UART1 RX (input-only pin) |
-| PPS | 16 | Rising edge = top of second |
+### Wiring
+
+| GPS Breakout | ESP32-PoE-ISO | Notes |
+|--------------|---------------|-------|
+| 3V3 | 3V3 | Power |
+| GND | GND | Ground |
+| PPS | GPIO 16 | 1Hz pulse, rising edge = top of second |
+| TX | GPIO 36 | GPS transmits → ESP32 receives (UART1 RX) |
+| RX | GPIO 4 | ESP32 transmits → GPS receives (UART1 TX) |
 
 ## Building
 
-Requires [PlatformIO](https://platformio.org/).
+Requires [PlatformIO](https://platformio.org/) 🇺🇦.
 
 ```bash
 pio run
