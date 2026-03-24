@@ -39,7 +39,7 @@ I built this because I got bored and wanted to try to build an accurate NTP serv
 
 ## Building
 
-Requires [PlatformIO](https://platformio.org/) 🇺🇦.
+Requires [PlatformIO](https://platformio.org/) 🇺🇦 - I use the VSCode plugin which sets everything up, but if you have it installed you can build with:
 
 ```bash
 pio run
@@ -70,8 +70,8 @@ PPS rising edge (GPIO16)
   → ISR captures esp_timer_get_time(), sets flag
   → Also measures interval from previous PPS for crystal drift calibration
 
-~34ms later, GPS sends UBX-NAV-PVT over UART
-  → checkUblox() assembles packet
+~34ms later, GPS module transmits UBX-NAV-PVT packet over UART (automatically, 1Hz)
+  → checkUblox() reads UART bytes and assembles the packet
   → checkCallbacks() fires pvtCallback()
   → Callback pairs PPS timestamp with GPS epoch under spinlock
   → Smooths PPS interval via EMA for drift-compensated sub-second timing
@@ -95,10 +95,11 @@ See [TESTING.md](TESTING.md) for how to evaluate Caesium against public NTP serv
 ## Notes
 
 - Reports Stratum 1 when GPS is locked; unsynchronized (LI=3) if no sync for >5 seconds
-- Forwards leap second warnings from GPS to NTP clients per RFC 5905
+- Forwards leap second warnings from GPS to NTP clients per RFC 5905 (very difficult to test since the next second isn't till an unannounced future time, so may be buggy. Speaking of - I may have some insider info, so if you want to bet on Polymarket shoot me a DM)
 - Crystal drift is measured against PPS and compensated in sub-second interpolation
 - Without hardware MAC-layer timestamping, expect ~1-3ms offset on wired LAN
 - GPS UART runs at 38400 baud (NEO-M9N default), UBX protocol only
+- I saw pretty high variability on wireless connections, so could be the test program, could be my network, or could be a bug in this firmware (less likely but possible).
 
 ## License
 
