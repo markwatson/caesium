@@ -20,6 +20,8 @@
 struct TimeState {
   uint32_t epochSec;     // Unix epoch at last validated PPS
   int64_t ppsTimeMicros; // esp_timer_get_time() captured at that PPS
+  uint32_t usPerPps;     // Measured crystal ticks per PPS interval (smoothed)
+  uint8_t leapIndicator; // NTP LI value: 0=none, 1=insert, 2=delete
   bool valid;            // True once PPS + GPS time have been paired
 };
 
@@ -56,5 +58,23 @@ bool isTimeValid();
  * Briefly disables interrupts for a consistent snapshot.
  */
 void getTimeStateAtomic(TimeState &state);
+
+/**
+ * Get the current crystal drift measurement for debug logging.
+ * Returns smoothed microseconds-per-PPS-interval, or 0 if not yet calibrated.
+ */
+uint32_t getCrystalCalibration();
+
+/**
+ * Set the NTP leap indicator (called from main.cpp after polling GPS).
+ * Values: 0=no warning, 1=last minute has 61s, 2=last minute has 59s.
+ */
+void setLeapIndicator(uint8_t li);
+
+/**
+ * Returns true once after each successful PPS+PVT sync.
+ * Used by main loop to know the UART is idle and safe for additional polls.
+ */
+bool consumeSyncEvent();
 
 #endif // GPS_TIME_H

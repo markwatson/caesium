@@ -32,9 +32,11 @@ struct __attribute__((packed)) NtpPacket {
   uint32_t txTimestamp_f;
 };
 
-// LI (Leap Indicator) values
-#define NTP_LI_NONE 0
-#define NTP_LI_ALARM 3
+// LI (Leap Indicator) values (RFC 5905 Figure 9)
+#define NTP_LI_NONE 0    // No warning
+#define NTP_LI_ADD_SEC 1  // Last minute of the day has 61 seconds
+#define NTP_LI_SUB_SEC 2  // Last minute of the day has 59 seconds
+#define NTP_LI_ALARM 3    // Clock unsynchronized
 
 // Mode values
 #define NTP_MODE_CLIENT 3

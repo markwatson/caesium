@@ -169,12 +169,42 @@ void loop() {
   myGNSS.checkUblox();
   myGNSS.checkCallbacks();
 
-  // Log PPS during startup (before time is valid)
   if (ppsTriggered) {
     ppsTriggered = false;
 
     if (!isTimeValid()) {
       Serial.printf("[PPS] #%lu | Waiting for time sync...\n", ppsCount);
+    } else {
+      // Log crystal calibration every 60 seconds
+      static uint32_t lastCalibLog = 0;
+      if (ppsCount - lastCalibLog >= 60) {
+        lastCalibLog = ppsCount;
+        uint32_t cal = getCrystalCalibration();
+        if (cal != 0) {
+          int32_t driftPpm = (int32_t)cal - 1000000;
+          Serial.printf("[DRIFT] Crystal: %lu us/pps (%+ld ppm)\n",
+                        (unsigned long)cal, (long)driftPpm);
+        }
+      }
+    }
+  }
+
+  // After a successful PPS+PVT sync, the UART is idle for ~900ms.
+  // This is the safe window for additional UART polls that would
+  // otherwise block checkUblox().
+  if (consumeSyncEvent()) {
+    static uint32_t lastLeapPoll = 0;
+    if (ppsCount - lastLeapPoll >= 3600) {
+      lastLeapPoll = ppsCount;
+      int32_t timeToEvent;
+      uint8_t li = myGNSS.getLeapIndicator(timeToEvent);
+      if (li <= 2) {
+        setLeapIndicator(li);
+        if (li > 0) {
+          Serial.printf("[LEAP] Warning: leap second %s in %ld seconds\n",
+                        li == 1 ? "insert" : "delete", (long)timeToEvent);
+        }
+      }
     }
   }
 

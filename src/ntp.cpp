@@ -36,11 +36,18 @@ static void hwTimeToNtp(int64_t hwTimeUs, const TimeState &state,
     elapsedUs = 0;
   }
 
-  uint32_t extraSeconds = (uint32_t)(elapsedUs / 1000000);
-  uint32_t remainingUs = (uint32_t)(elapsedUs % 1000000);
+  // Use calibrated crystal frequency instead of assuming 1,000,000 µs/s.
+  // This corrects for 20-40 ppm crystal drift in the sub-second interpolation.
+  uint32_t interval = state.usPerPps;
+
+  uint32_t extraSeconds = (uint32_t)(elapsedUs / interval);
+  uint32_t remainingUs = (uint32_t)(elapsedUs % interval);
 
   seconds = state.epochSec + extraSeconds + NTP_UNIX_OFFSET;
-  fraction = ((uint64_t)remainingUs * 4294967296ULL) / 1000000ULL;
+
+  // Map crystal ticks directly to NTP fraction space:
+  // fraction = (remainingUs / interval) * 2^32
+  fraction = (uint32_t)(((uint64_t)remainingUs << 32) / interval);
 }
 
 /**
@@ -112,8 +119,9 @@ static void ntpRecvCallback(void *arg, struct udp_pcb *upcb, struct pbuf *p,
 
   if (state.valid) {
     // SYNCHRONIZED — Stratum 1 GPS server
+    // Use leap indicator from GPS (0=none, 1=insert, 2=delete)
     txPacket.li_vn_mode =
-        makeNtpFlags(NTP_LI_NONE, clientVersion, NTP_MODE_SERVER);
+        makeNtpFlags(state.leapIndicator, clientVersion, NTP_MODE_SERVER);
     txPacket.stratum = NTP_STRATUM_PRIMARY;
 
     // Root dispersion: grows at PHI (15 ppm) since last PPS sync.
