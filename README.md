@@ -92,14 +92,16 @@ Hourly (in post-sync UART idle window)
 
 See [TESTING.md](TESTING.md) for how to evaluate Caesium against public NTP servers using chrony on a Linux client. Includes chrony configuration, multi-day data collection, and an analysis script (`analyze_chrony.py`) that parses chrony logs and generates a comparison report.
 
+A 28.8-day soak (4119 samples) showed no loss of sync, and left one puzzle: Caesium read 0.81 ms behind internet stratum-1 consensus. [TIMEBASE.md](TIMEBASE.md) is the investigation that resolved it, and [HANDOFF.md](HANDOFF.md) is the condensed version. Short answer: it is not the device. A validation pulse fired from the same time base that serves NTP, scoped against the PPS with a logic analyzer, put the device's own time-base error at **+5 µs** — about 160x too small to explain the gap, which is asymmetry in the shared upstream network path. Raw captures are in [data/](data/).
+
 ## Notes
 
 - Reports Stratum 1 when GPS is locked; unsynchronized (LI=3) if no sync for >5 seconds
 - Forwards leap second warnings from GPS to NTP clients per RFC 5905 (very difficult to test since the next second isn't till an unannounced future time, so may be buggy. Speaking of - I may have some insider info, so if you want to bet on Polymarket shoot me a DM)
 - Crystal drift is measured against PPS and compensated in sub-second interpolation
-- Without hardware MAC-layer timestamping, expect ~1-3ms offset on wired LAN
+- Without hardware MAC-layer timestamping, expect ~1-3ms offset on wired LAN. Measured more carefully since: the device's own contribution is bounded at **0.25 ms** by `|bias| <= delay/2`, and its time base tracks its own PPS to **5 µs**. Most of what you see beyond that is the network path, not the device
 - GPS UART runs at 38400 baud (NEO-M9N default), UBX protocol only
-- I saw pretty high variability on wireless connections, so could be the test program, could be my network, or could be a bug in this firmware (less likely but possible).
+- I saw pretty high variability on wireless connections. Since resolved: it is the network, not the firmware. Measuring the same device over Wi-Fi vs wired gives offset sd 0.901 ms vs 0.207 ms and a delay floor of 2.80 ms vs 1.05 ms, while the device-side processing time (T3-T2) reads an identical ~26 µs on both. Use a wired client for anything you intend to trust.
 
 ## License
 
