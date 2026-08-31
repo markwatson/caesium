@@ -11,7 +11,9 @@ genuinely unresolved and need investigation before anyone plans around them.
 > and the asymmetry trap below (fixing TX alone makes accuracy worse) still
 > applies in full.
 
-Measurement background is in [report_20260830.log](report_20260830.log).
+Measurement background was in `report_20260830.log`, which is **local only** —
+`*.log` is gitignored, so it did not travel with the repo. The numbers that
+matter are inlined in [HANDOFF.md](HANDOFF.md) and [TIMEBASE.md](TIMEBASE.md).
 
 ## Why bother
 

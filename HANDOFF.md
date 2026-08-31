@@ -5,8 +5,8 @@ another machine. Self-contained: all key numbers are inline, because the
 `report_*.log` files are gitignored (`*.log`) and will NOT travel with the repo.
 
 Related: [HWTIMESTAMPING.md](HWTIMESTAMPING.md) (design sketch, conditional on
-the outcome below), [report_20260830.log](report_20260830.log) (full data,
-local only), [TESTING.md](TESTING.md) (how the chrony soak works).
+the outcome below), `report_20260830.log` (full data, local only — `*.log` is
+gitignored), [TESTING.md](TESTING.md) (how the chrony soak works).
 
 ---
 
