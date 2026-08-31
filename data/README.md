@@ -33,6 +33,11 @@ timestamps are deliberately absent; see the anchoring file below for why.
 | `timebase_60s_summary.json` | Computed statistics for the above |
 | `timebase_180s_under_load_edges.csv` | 180 s while serving 4711 NTP req/s |
 | `timebase_180s_under_load_summary.json` | Load-test statistics — **read the caveat in TIMEBASE.md** |
+| `timebase_180s_quiet_postfix_edges.csv` | 180 s quiet on merged firmware (incl. `b7fa5eb`). `E_c` = +5.120 us |
+| `timebase_180s_quiet_postfix_summary.json` | Statistics for the above |
+| `timebase_180s_quiet_postfix.sal` | Raw Logic 2 capture — reopen directly in the GUI |
+| `timebase_180s_load_postfix_edges.csv` | 180 s at 4258 req/s on merged firmware |
+| `timebase_180s_load_postfix_summary.json` | **0 whole-second errors in 757,859 queries**; NTP offset sd 0.084 ms |
 | `pps_soak_274s_clean_edges.csv` | PPS characterisation, clean window. 0 dropped, 73.1 ns jitter |
 | `pps_soak_300s_edges.csv.gz` | Full 300 s soak including the interference event at t=275.86 s |
 | `pps_60s_interference_a.csv` | PPS during the interference, ~4000 spurious edges/60 s |

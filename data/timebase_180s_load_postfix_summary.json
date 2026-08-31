@@ -1,0 +1,19 @@
+{
+ "firmware": "merged, includes b7fa5eb starvation guard",
+ "duration_s": 180.0,
+ "queries": 757859,
+ "req_per_s": 4258,
+ "failed": 2,
+ "ntp_delay_min_ms": 0.4189014434814453,
+ "ntp_delay_median_ms": 1.3628005981445312,
+ "ntp_offset_median_ms": 0.3587007522583008,
+ "ntp_offset_sd_ms": 0.08374116760728335,
+ "ntp_offset_min_ms": -7.554292678833008,
+ "ntp_offset_max_ms": 3.8874149322509766,
+ "whole_second_errors": 0,
+ "samples": 757859,
+ "E_c_median_us": 5.980000004512931,
+ "E_c_sd_us": 40.97693365979594,
+ "E_c_min_us": 4.96000000005381,
+ "E_c_max_us": 127.67000000035722
+}

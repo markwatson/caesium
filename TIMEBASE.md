@@ -217,6 +217,43 @@ Separating device from instrument here would need the pulse emitted from an ISR
 or a hardware timer rather than from `loop()`. Worth doing only if serving
 accuracy under sustained heavy load ever becomes a real question.
 
+### Post-fix verification — the load test redone properly
+
+The load run above predated `b7fa5eb` and recorded only RTT, so it could not
+have detected the epoch-labelling failure that commit guards against. Redone on
+merged firmware, recording NTP **offset** concurrently — a 1 s epoch error shows
+up there and nowhere else.
+
+| | pre-fix quiet | pre-fix load | **post-fix quiet** | **post-fix load** |
+|---|---|---|---|---|
+| Requests/s | ~0 | 4711 | ~0 | **4258** |
+| `E_c` median | +5.070 us | +22.900 us | **+5.120 us** | **+5.980 us** |
+| `E_c` sd | 0.246 us | 43.740 us | **0.206 us** | 40.977 us |
+| `E_c` max | +8.930 us | +189.490 us | +7.310 us | +127.670 us |
+
+**The guard holds: 0 whole-second errors in 757,859 queries.** That is the
+result the previous run could not produce, taken at the exact request rate that
+provokes Core 1 starvation.
+
+**Served accuracy does not degrade under load.** NTP offset held at median
++0.359 ms with **sd 0.084 ms** across 757,859 samples at 4258 req/s — *tighter*
+than the quiet spot-checks taken earlier in the session. Two failures out of
+757,859 (0.0003%). Delay floor 0.419 ms, better than the 1.05 ms idle figure.
+
+**This confirms the caveat above: the `E_c` tail is instrument, not device.** If
+the time base genuinely wandered by 128 us under load, the NTP offsets would
+show it — 0.084 ms of spread across three quarters of a million samples says it
+does not. Note also that the *median* barely moves (5.120 -> 5.980 us) while the
+mean and max blow out: that is the signature of occasional preemption spikes on
+an otherwise clean distribution, exactly as predicted for an edge emitted from
+`loop()`.
+
+The post-fix median under load (+5.980 us) is markedly better than pre-fix
+(+22.900 us). Suggestive, but one run each — not a controlled comparison.
+
+**Quiet `E_c` is unchanged by the fix** (+5.070 -> +5.120 us, sd 0.246 -> 0.206),
+so the starvation guard costs nothing in the normal regime.
+
 ### The accuracy budget, now fully bounded
 
 | Contribution | Bound | Source |

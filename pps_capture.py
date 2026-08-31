@@ -45,6 +45,11 @@ DEFAULT_GLITCH_US = 5.0
 
 def capture(duration, channels, sample_rate, glitch_us, outdir, save_sal=None):
     """Run one timed capture and return {channel: [(time, value), ...]}."""
+    # Logic 2 resolves these paths in its own process, not ours, so a relative
+    # path would silently write somewhere else entirely.
+    outdir = os.path.abspath(outdir)
+    if save_sal:
+        save_sal = os.path.abspath(save_sal)
     saleae_mcp.init()
     cfg = {
         "logicChannels": {"digitalChannels": list(channels)},
