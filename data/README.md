@@ -43,6 +43,11 @@ timestamps are deliberately absent; see the anchoring file below for why.
 | `pps_60s_interference_a.csv` | PPS during the interference, ~4000 spurious edges/60 s |
 | `pps_60s_interference_b.csv` | Second interference capture |
 | `pps_60s_interference_summary.json` | Shows how width-matching recovers the PPS |
+| `starvation_prefix_periodic.json` | Pre-fix under induced starvation: **1005 whole-second errors in 5990 samples** |
+| `starvation_postfix_periodic.json` | Same injection, with the gap guard: **0 errors**, offset sd 0.242 ms |
+| `starvation_prefix.json` | Continuous-starvation variant, pre-fix: 803 errors |
+| `starvation_postfix.json` | Continuous-starvation variant, fixed: 0 errors, device correctly reports LI=3 |
+| `starvation_production_normal.json` | Production build, no injection: 4294 samples, 0 errors, sd 0.191 ms |
 | `anchor_test_phases.json` | 8 captures of the same PPS in host-clock phase. **115.7 ms spread** — why absolute timestamps cannot anchor this measurement |
 
 ## Reproducing

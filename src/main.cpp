@@ -265,6 +265,12 @@ void loop() {
           int32_t driftPpm = (int32_t)cal - 1000000;
           Serial.printf("[DRIFT] Crystal: %lu us/pps (%+ld ppm)\n",
                         (unsigned long)cal, (long)driftPpm);
+          uint32_t dropped = getDroppedPairingCount();
+          if (dropped > 0) {
+            Serial.printf("[PAIRING] %lu publishes dropped (starved across a "
+                          "second boundary)\n",
+                          (unsigned long)dropped);
+          }
 #ifdef TIMEBASE_PULSE
           Serial.printf("[TIMEBASE] %lu pulses emitted on GPIO%d+%d\n",
                         (unsigned long)timebasePulseCount, TIMEBASE_PIN,
@@ -296,6 +302,24 @@ void loop() {
 
 #ifdef TIMEBASE_PULSE
   emitTimebasePulse();
+#endif
+
+#ifdef STARVE_TEST
+  /*
+   * Deliberately starve loop() across a second boundary, to exercise the
+   * PPS/PVT pairing guards. Debug builds only — never ship this.
+   *
+   * The stale-pairing window is narrow: the loop must resume after PPS(n+1)
+   * but before PVT(n+1) lands ~34ms later, with PVT(n) still unread in the
+   * UART FIFO. Stalling once every ~6 seconds walks the resume phase forward
+   * 50ms each time, sweeping the whole second across a run, while leaving
+   * several clean seconds in between so normal syncing is still exercised.
+   */
+  static uint32_t lastStarveAt = 0;
+  if (ppsCount - lastStarveAt >= 6) {
+    lastStarveAt = ppsCount;
+    delay(1050);
+  }
 #endif
 
   // Yield briefly so other FreeRTOS tasks can run

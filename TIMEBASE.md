@@ -350,6 +350,65 @@ before the onset and is the trustworthy dataset.
 
 ---
 
+## Pairing guard — residual case found and closed
+
+Reviewing `b7fa5eb` before fleet deployment turned up a case its sequence
+counter cannot reach. The counter only catches a PPS edge firing *after*
+`latchUartCycleSequence()`. But that latch is the first statement in `loop()`,
+so if the task is simply never **scheduled** for a full second — blocked at
+`vTaskDelay(1)` while `tcpip_thread` holds the core — it resumes, latches
+`ppsSequence` at its already-incremented value, and the comparison comes out
+equal:
+
+```
+resume t=1010ms  ->  latch seq = n+1        (edge already fired)
+                 ->  parse PVT(n) from FIFO (still unread)
+                 ->  ppsAge = 10ms          (PPS(n+1)'s stamp is fresh, passes)
+                 ->  seq n+1 == n+1         (guard passes)
+                 ->  publish epoch(n) with PPS(n+1)'s timestamp  == 1s stale
+```
+
+Nothing observable separates the two states: the timestamp is fresh either way,
+so the `ppsAge` check cannot help. The gap between loop iterations is the only
+remaining evidence, so `latchUartCycleSequence()` now records it and marks the
+cycle suspect past `UART_CYCLE_MAX_GAP_US` (500 ms). `pvtCallback` drops such a
+publish but **leaves `ppsFlag` set** — the edge is good, only the PVT is stale,
+so the next PVT pairs correctly one second later rather than two.
+
+A `getDroppedPairingCount()` counter is surfaced on the periodic debug line;
+non-zero in the field means that device was starved across a second boundary.
+
+### Validated on hardware, both directions
+
+An `esp32-poe-iso-starvetest` env stalls `loop()` 1050 ms once every ~6 s. The
+1050 ms is deliberate: it walks the resume phase forward 50 ms each time,
+sweeping the whole second so the narrow window is hit repeatedly instead of by
+luck, while leaving clean seconds in between so normal syncing still runs.
+
+Identical injection, identical probe, only the guard differs:
+
+| | pre-fix (`b7fa5eb`) | **fixed** |
+|---|---|---|
+| Samples | 5990 | 5988 |
+| **Whole-second errors** | **1005 (16.8%)** | **0** |
+| Offset sd | 373.669 ms | **0.242 ms** |
+| Offset range | -1.003646 .. +0.003391 s | -0.008810 .. +0.003522 s |
+| Unsynced (LI=3) | 0 | 0 |
+
+Every pre-fix error sat at exactly **-1.000000 s** — the predicted signature.
+Note that LI=3 was never set: the device reported itself synchronised while
+serving time a full second wrong, one sample in six. That is the failure mode
+worth caring about, because a client has no way to detect it.
+
+Regression check on the real production build, no injection: 4294 samples,
+0 failures, 0 unsynced, offset sd 0.191 ms, 0 dropped pairings. The guard costs
+nothing in normal operation.
+
+> **`esp32-poe-iso-starvetest` is a test fixture. Never deploy it.** Under
+> *continuous* starvation it correctly refuses to publish at all and the device
+> reports LI=3 — the right failure direction for a time server, but not a state
+> to ship into.
+
 ## Shipping
 
 The debug pulse is behind `-D TIMEBASE_PULSE` and the default `esp32-poe-iso`

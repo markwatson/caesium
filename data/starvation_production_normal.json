@@ -1,0 +1,10 @@
+{
+ "label": "production_normal",
+ "samples": 4294,
+ "failed": 0,
+ "unsynced": 0,
+ "whole_second_errors": 0,
+ "offset_median_ms": -0.3782510757446289,
+ "offset_min_s": -0.002821207046508789,
+ "offset_max_s": 0.0018982887268066406
+}

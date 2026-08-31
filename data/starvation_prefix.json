@@ -1,0 +1,10 @@
+{
+ "label": "prefix",
+ "samples": 4052,
+ "failed": 0,
+ "unsynced": 73402,
+ "whole_second_errors": 803,
+ "offset_median_ms": 0.020623207092285156,
+ "offset_min_s": -1.0067304372787476,
+ "offset_max_s": 0.0056231021881103516
+}

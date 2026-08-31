@@ -1,0 +1,10 @@
+{
+ "label": "postfix_periodic",
+ "samples": 5988,
+ "failed": 0,
+ "unsynced": 0,
+ "whole_second_errors": 0,
+ "offset_median_ms": -0.23221969604492188,
+ "offset_min_s": -0.008809804916381836,
+ "offset_max_s": 0.0035219192504882812
+}
