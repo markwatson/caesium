@@ -164,6 +164,12 @@ void setup() {
 }
 
 void loop() {
+  // Snapshot the PPS edge counter before touching the UART. If a PPS edge
+  // fires while we're parsing a buffered PVT message, pvtCallback uses
+  // this snapshot to detect that it's about to pair the new edge's
+  // timestamp with the old edge's PVT (off by exactly 1s) and aborts.
+  latchUartCycleSequence();
+
   // Drive the SparkFun library: read UART bytes and assemble packets,
   // then fire any pending callbacks (e.g. pvtCallback).
   myGNSS.checkUblox();

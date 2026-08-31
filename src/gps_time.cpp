@@ -28,6 +28,14 @@ static volatile bool ppsFlag = false;
 static volatile int64_t ppsIntervalUs = 0;
 static volatile bool ppsIntervalValid = false;
 
+// Monotonic edge counter; main loop latches it at the top of every iteration
+// into ppsSeqAtUartRead. pvtCallback compares the live counter against the
+// latched value to detect a PPS edge that fired while a PVT message was
+// queued — pairing the new edge's timestamp with the old edge's PVT would
+// publish time that's exactly 1s in the past.
+static volatile uint32_t ppsSequence = 0;
+static volatile uint32_t ppsSeqAtUartRead = 0;
+
 // Debug counters
 volatile uint32_t ppsCount = 0;
 volatile bool ppsTriggered = false;
@@ -82,6 +90,7 @@ void IRAM_ATTR ppsISR() {
     ppsIntervalValid = true;
   }
   ppsTimestampUs = now;
+  ppsSequence++;
   ppsFlag = true;
   portEXIT_CRITICAL_ISR(&timeStateMux);
 
@@ -153,6 +162,15 @@ void pvtCallback(UBX_NAV_PVT_data_t *pvtData) {
                               pvtData->hour, pvtData->min, pvtData->sec);
 
   portENTER_CRITICAL(&timeStateMux);
+  // If a PPS edge fired between when this UART cycle started and now, the
+  // PVT we just parsed describes the *previous* edge — but ppsTimestampUs
+  // has already been overwritten. Pairing them would publish a 1s-stale
+  // time. Drop the publish; the next edge+PVT will sync cleanly.
+  if (ppsSequence != ppsSeqAtUartRead) {
+    ppsFlag = false;
+    portEXIT_CRITICAL(&timeStateMux);
+    return;
+  }
   timeState.epochSec = epoch;
   timeState.ppsTimeMicros = capturedPpsUs;
   timeState.usPerPps = calibratedInterval;
@@ -161,6 +179,12 @@ void pvtCallback(UBX_NAV_PVT_data_t *pvtData) {
   portEXIT_CRITICAL(&timeStateMux);
 
   syncJustCompleted = true;
+}
+
+void latchUartCycleSequence() {
+  portENTER_CRITICAL(&timeStateMux);
+  ppsSeqAtUartRead = ppsSequence;
+  portEXIT_CRITICAL(&timeStateMux);
 }
 
 void initGpsTime(uint8_t ppsPin) {

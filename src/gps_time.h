@@ -77,4 +77,13 @@ void setLeapIndicator(uint8_t li);
  */
 bool consumeSyncEvent();
 
+/**
+ * Snapshot the current PPS edge counter into the "before UART read" slot.
+ * Must be called at the top of every loop iteration that may end up
+ * invoking pvtCallback (i.e. before checkUblox/checkCallbacks). The
+ * callback compares the live counter against this snapshot to detect a
+ * PPS edge that fired while the PVT was queued in the UART FIFO.
+ */
+void latchUartCycleSequence();
+
 #endif // GPS_TIME_H
