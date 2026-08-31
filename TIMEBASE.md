@@ -350,6 +350,23 @@ before the onset and is the trustworthy dataset.
 
 ---
 
+## Shipping
+
+The debug pulse is behind `-D TIMEBASE_PULSE` and the default `esp32-poe-iso`
+env is unaffected. Verified rather than assumed: building the default env from
+this branch and from `origin/main` gives binaries differing in **69 bytes of
+579,136** — the embedded build timestamp and the app-descriptor hash that
+includes it. The firmware source diff against main is **84 lines added, 0
+removed**, every one inside the `#ifdef`.
+
+Caesium was returned to the production build after measurement and confirmed:
+stratum 1 within ~5 s, GPIO32/33 silent, PPS still running.
+
+```bash
+pio run -e esp32-poe-iso -t upload            # production
+pio run -e esp32-poe-iso-timebase -t upload   # debug, for re-measuring
+```
+
 ## Status
 
 - [x] Analyzer plumbing, PPS located on channel 1, capture tooling
