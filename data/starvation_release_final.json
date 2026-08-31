@@ -1,0 +1,10 @@
+{
+ "label": "release_final",
+ "samples": 7139,
+ "failed": 0,
+ "unsynced": 0,
+ "whole_second_errors": 0,
+ "offset_median_ms": 0.1342296600341797,
+ "offset_min_s": -0.00637209415435791,
+ "offset_max_s": 0.008031249046325684
+}
