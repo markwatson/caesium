@@ -10,6 +10,17 @@ local only), [TESTING.md](TESTING.md) (how the chrony soak works).
 
 ---
 
+## RESOLVED 2026-08-31
+
+**`E_c` = +5.07 us** measured over 600 s with a Saleae Logic 8 against the
+GPIO33/32 validation pulse. Caesium's served time tracks its own PPS to five
+microseconds — 160x too small to explain 0.81 ms. **Hypothesis (b) is dead;
+>=0.56 ms is WAN asymmetry (a).** Full method and numbers in
+[TIMEBASE.md](TIMEBASE.md). The section below is retained as the record of what
+the question was and why it was shaped this way.
+
+---
+
 ## The one open question
 
 Caesium reads **0.81 ms behind** the internet stratum-1 consensus. That gap
@@ -85,11 +96,12 @@ closing it is the next action.
 
 ## NEXT ACTION: time-base validation pulse
 
-> **Status 2026-08-31 — implemented, not yet run.** The pulse is in
-> `src/main.cpp` behind `-D TIMEBASE_PULSE` (env `esp32-poe-iso-timebase`) and
-> builds clean. Analyzer plumbing, PPS characterisation and the measurement
-> tooling are done. Remaining: flash the debug build and wire GPIO33.
-> Full write-up and results in [TIMEBASE.md](TIMEBASE.md).
+> **Status 2026-08-31 — DONE. `E_c` = +5.07 us over 600 pulses.** Landed in
+> row 1 of the decision tree below: the served time tracks the PPS, so
+> `0.81 - 0.25` = **>=0.56 ms is WAN**. The pulse lives in `src/main.cpp`
+> behind `-D TIMEBASE_PULSE` (env `esp32-poe-iso-timebase`) and drives GPIO33
+> and GPIO32 together. Method, tooling and full numbers in
+> [TIMEBASE.md](TIMEBASE.md).
 
 Cheapest, sharpest, and needs no purchases beyond a ~$15 logic analyzer.
 Measures `E_c` — whether the *served* time actually tracks the PPS edge.

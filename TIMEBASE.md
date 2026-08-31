@@ -10,6 +10,24 @@ full investigation this follows from.
 
 ---
 
+## Result
+
+**`E_c` = +5.07 µs** over 600 consecutive seconds. Caesium's served time tracks
+its own PPS to five microseconds — **160x too small** to explain the 0.81 ms
+gap. Hypothesis (b) is dead; the remaining **>=0.56 ms is WAN asymmetry**.
+
+| | 60 s pilot | 600 s soak |
+|---|---|---|
+| Pulses | 60 | **600** |
+| `E_c` median | +5.080 us | **+5.070 us** |
+| `E_c` mean / sd | +5.151 / 0.327 us | **+5.122 / 0.246 us** |
+| `E_c` range | +4.890 .. +7.340 us | +4.880 .. +8.930 us |
+
+Two independent runs agree to **10 ns** on the median. See
+[Results](#results-1) for the full budget.
+
+---
+
 ## The question
 
 Caesium reads **0.81 ms behind** internet stratum-1 consensus. Two hypotheses
@@ -95,11 +113,18 @@ of about one second, over which that wander contributes ~33 ns.
 | Signal | ESP32 pin | Analyzer channel |
 |---|---|---|
 | GPS PPS | GPIO16 | 1 |
-| Validation pulse | GPIO33 | 0 |
+| Validation pulse | **GPIO33 or GPIO32** | 0 |
 | Ground | GND | probe ground (**short lead, see below**) |
 
-GPIO33 is free on the EXT header and output-capable. GPIO34-39 are input-only.
-GPIO17 is the Ethernet clock and is not led out.
+The pulse is driven on **both GPIO32 and GPIO33 simultaneously** — same output
+register bank, one atomic write, no skew. Probe whichever is easier: GPIO32 sits
+directly adjacent to the PPS pin, GPIO33 two above it. This removes a fiddly
+pin-counting step on a dense header where GPIO34-39 are input-only and a slip
+onto one is indistinguishable from a bad contact.
+
+GPIO17 is the Ethernet clock and is not led out. The PPS is also available on
+the **GPS breakout's silkscreened PPS pin** — the same net as GPIO16, and a much
+easier probe target.
 
 ### Running it
 
@@ -115,13 +140,52 @@ python3 pps_capture.py --mode timebase --duration 600 --json timebase.json
 
 | Result | Meaning | Then |
 |---|---|---|
-| `E_c` within ~10 us | served time tracks PPS | `0.81 - 0.25 = ` **>=0.56 ms is WAN**. Investigation closed. |
+| **`E_c` within ~10 us** | **served time tracks PPS** | **`0.81 - 0.25` = >=0.56 ms is WAN. Investigation closed.** |
 | `E_c` ~ +800 us | the device time base is the culprit | WAN theory dead; debug PPS/epoch pairing and interpolation |
 | in between | partial | fall back to the parked local GPS reference clock |
 
+> **Outcome: row 1, at +5.07 us.** Investigation closed.
+
 ---
 
-## Results so far
+## Results
+
+### Time-base validation — 600 s, 600 pulses
+
+| Quantity | Value |
+|---|---|
+| Pulses emitted / captured | 600 / 600 |
+| PPS edges | 600, **0 dropped** |
+| **`E_c` median** | **+5.070 us** |
+| `E_c` mean / sd | +5.122 / **0.246 us** |
+| `E_c` range | +4.880 .. +8.930 us |
+| PPS pulse width | 99.998941 ms, sd 20.3 ns |
+
+**The sign is the consistency check.** `hwTimeToNtp()` anchors served time to
+`ppsTimeMicros`, which the PPS ISR records *after* interrupt-entry latency L.
+For any request, `elapsed = hwTime - ppsTimeMicros` is then short by L and the
+served time comes out **slow** by L. The same L delays the pulse, which targets
+`ppsTimeMicros + usPerPps`. So a faithful time base with real ISR latency
+predicts a *positive* `E_c` — which is what HANDOFF.md said before any of this
+was wired, and what was observed. A negative or scattered result would have
+meant the rig was wrong, not the device.
+
++5 us is an entirely ordinary ESP32 GPIO interrupt latency, and sd 0.246 us
+across 600 samples says it is a stable systematic, not noise.
+
+### The accuracy budget, now fully bounded
+
+| Contribution | Bound | Source |
+|---|---|---|
+| Device packet path | <= 0.25 ms | `\|bias\| <= delta/2`, delta = 0.504 ms |
+| Device time base (`E_c`) | **0.005 ms** | **measured here** |
+| **Device total** | **<= 0.255 ms** | |
+| Observed gap to internet stratum-1 | 0.81 ms | 28.8-day chrony soak |
+| **Unaccounted -> WAN asymmetry** | **>= 0.56 ms** | by difference |
+
+The time-base term was the only unmeasured quantity in that table and the one
+HANDOFF.md called "the weakest link in the whole chain". It is now measured and
+negligible.
 
 ### PPS characterisation — 274 s at 100 MS/s, uninterrupted
 
@@ -211,6 +275,31 @@ before the onset and is the trustworthy dataset.
 - [x] Anchoring approach tested and ruled out, with numbers
 - [x] PPS characterised: clean, no dropped pulses, 73 ns jitter
 - [x] `-D TIMEBASE_PULSE` firmware written and **building** (44.2% flash, 8.2% RAM)
-- [ ] Flash the debug build to Caesium — needs USB access, no OTA in firmware
-- [ ] Wire GPIO33 to channel 0, fix the probe ground
-- [ ] Run `--mode timebase` and resolve (a) vs (b)
+- [x] Flash the debug build to Caesium
+- [x] Wire the pulse to channel 0, fix the probe ground
+- [x] Run `--mode timebase` — **resolved: (a) WAN asymmetry**
+
+### What this does not prove
+
+The served time tracks the PPS. It does **not** independently verify the PPS
+against UTC — that still rests on the NEO-M9N's ~30 ns spec. The assumption is
+far better supported than before (0 dropped pulses across 874 s of capture,
+14.5-184 ns jitter, pulse width stable to 9-20 ns), but it is still an
+assumption. Closing it needs the parked independent reference clock.
+
+The packet-path term likewise remains *bounded*, not measured. Measuring it is
+what RFC 9769 interleaved mode plus RX timestamping would buy.
+
+### Consequences
+
+- **Caesium is better than 0.81 ms implied.** That number came from comparing
+  through an asymmetric internet path. LAN clients are one router hop away and
+  never traverse it; what they see is bounded by the ~0.25 ms packet term.
+- **The asymmetry is not fixable from here.** It is in the shared upstream
+  segment every traceroute crosses before diverging
+  (`192.168.72.1 -> 207.225.112.10 -> 63.225.124.73`).
+- **Gotcha 3 in HANDOFF.md is now load-bearing.** Tuning a constant until the
+  NIST comparison reads zero would bake >=1.12 ms of ISP asymmetry into a device
+  whose clients never see that path — making it materially worse for every real
+  consumer while the graph looked perfect.
+- **`HWTIMESTAMPING.md` is optional polish**, exactly as the decision tree said.

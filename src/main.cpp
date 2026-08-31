@@ -33,13 +33,20 @@
  * Both edges originate on the device, so the measurement is a pure interval
  * and never touches the host clock.
  *
- * GPIO33 is free on the EXT header and output-capable. GPIO34-39 are
- * input-only; GPIO17 is the Ethernet clock and is not led out.
+ * The pulse is driven on GPIO33 *and* GPIO32 simultaneously. Both are free on
+ * the EXT header, both are output-capable, and both live in the out1 register
+ * bank -- so a single write drives them with no skew between them. Probing
+ * either one gives the same measurement, which removes a fiddly pin-counting
+ * step on a dense 10-pin header where GPIO34-39 are input-only and a slip onto
+ * one of them is indistinguishable from a bad contact.
+ *
+ * GPIO17 is the Ethernet clock and is not led out; do not use it.
  */
 #include "soc/gpio_struct.h"
 
-#define TIMEBASE_PIN 33
-#define TIMEBASE_BIT (1UL << (TIMEBASE_PIN - 32)) // GPIO32+ live in the out1 bank
+#define TIMEBASE_PIN 33     // primary, 2 pins above the PPS on the EXT header
+#define TIMEBASE_PIN_ALT 32 // secondary, directly adjacent to the PPS pin
+#define TIMEBASE_BIT ((1UL << (TIMEBASE_PIN - 32)) | (1UL << (TIMEBASE_PIN_ALT - 32)))
 #define TIMEBASE_ARM_WINDOW_US 2000               // only busy-wait when this close
 #define TIMEBASE_PULSE_WIDTH_US 50
 
@@ -213,8 +220,10 @@ void setup() {
 #ifdef TIMEBASE_PULSE
   pinMode(TIMEBASE_PIN, OUTPUT);
   digitalWrite(TIMEBASE_PIN, LOW);
-  Serial.printf("[INIT] Time-base validation pulse enabled on GPIO%d\n",
-                TIMEBASE_PIN);
+  pinMode(TIMEBASE_PIN_ALT, OUTPUT);
+  digitalWrite(TIMEBASE_PIN_ALT, LOW);
+  Serial.printf("[INIT] Time-base validation pulse enabled on GPIO%d and GPIO%d\n",
+                TIMEBASE_PIN, TIMEBASE_PIN_ALT);
 #endif
 
   // Initialize Ethernet (NTP server starts when we get an IP)
@@ -251,8 +260,9 @@ void loop() {
           Serial.printf("[DRIFT] Crystal: %lu us/pps (%+ld ppm)\n",
                         (unsigned long)cal, (long)driftPpm);
 #ifdef TIMEBASE_PULSE
-          Serial.printf("[TIMEBASE] %lu pulses emitted on GPIO%d\n",
-                        (unsigned long)timebasePulseCount, TIMEBASE_PIN);
+          Serial.printf("[TIMEBASE] %lu pulses emitted on GPIO%d+%d\n",
+                        (unsigned long)timebasePulseCount, TIMEBASE_PIN,
+                        TIMEBASE_PIN_ALT);
 #endif
         }
       }
