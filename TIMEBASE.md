@@ -173,6 +173,50 @@ meant the rig was wrong, not the device.
 +5 us is an entirely ordinary ESP32 GPIO interrupt latency, and sd 0.246 us
 across 600 samples says it is a stable systematic, not noise.
 
+### Under NTP load — 180 s at 4711 req/s
+
+Run while flooding the device from six threads, to check whether serving
+traffic perturbs the time base. It does, but read the caveat before drawing
+conclusions.
+
+| Quantity | Quiet | Under load |
+|---|---|---|
+| NTP queries | ~0 | **838,510 (4711 req/s)** |
+| NTP RTT median / p99 | — | 1.259 / **1.406 ms** |
+| Failed queries | — | **0** |
+| `E_c` median | +5.070 us | **+22.900 us** |
+| `E_c` mean / sd | +5.122 / 0.246 us | +42.537 / 43.740 us |
+| `E_c` max | +8.930 us | **+189.490 us** |
+
+**The robustness result is genuinely good.** Caesium sustained 4711 requests
+per second with zero failures and a p99 round trip of 1.406 ms — barely above
+its 1.05 ms floor. It does not fall over, drop requests, or lose GPS lock under
+load far beyond anything a home network will produce.
+
+**The `E_c` degradation is mostly instrument, not device.** This is important
+and easy to get wrong. The two paths are not equally exposed to scheduling:
+
+- The **pulse** is emitted from `loop()` on core 1. It busy-waits to `target`
+  and then writes the GPIO — so any preemption of core 1 *at that instant*
+  delays the edge. Under 4711 req/s of Ethernet and lwIP interrupt activity,
+  preemption is frequent. The pulse is late; the time base need not be.
+- The **NTP response** is timestamped inline in `tcpip_thread` with
+  `esp_timer_get_time()` the moment the packet arrives. No `loop()` scheduling
+  enters that path, and separate T2/T3 stamps make `s_proc` cancel regardless.
+
+So this run bounds *pulse emission jitter under load*, and only indirectly says
+anything about served accuracy. A component of it could be genuine — PPS ISR
+latency may also rise under load, which would affect served time — but this
+measurement cannot separate the two.
+
+**It does not affect the WAN conclusion.** The 28.8-day chrony comparison ran at
+normal poll intervals (a few queries per minute), which is the quiet regime. The
++5.07 us figure is the applicable one.
+
+Separating device from instrument here would need the pulse emitted from an ISR
+or a hardware timer rather than from `loop()`. Worth doing only if serving
+accuracy under sustained heavy load ever becomes a real question.
+
 ### The accuracy budget, now fully bounded
 
 | Contribution | Bound | Source |
@@ -278,6 +322,8 @@ before the onset and is the trustworthy dataset.
 - [x] Flash the debug build to Caesium
 - [x] Wire the pulse to channel 0, fix the probe ground
 - [x] Run `--mode timebase` — **resolved: (a) WAN asymmetry**
+- [x] Load test at 4711 req/s — device robust; see caveat above
+- [x] Raw captures archived in [data/](data/) — the rig was awkward to build
 
 ### What this does not prove
 
