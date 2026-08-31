@@ -85,6 +85,12 @@ closing it is the next action.
 
 ## NEXT ACTION: time-base validation pulse
 
+> **Status 2026-08-31 — implemented, not yet run.** The pulse is in
+> `src/main.cpp` behind `-D TIMEBASE_PULSE` (env `esp32-poe-iso-timebase`) and
+> builds clean. Analyzer plumbing, PPS characterisation and the measurement
+> tooling are done. Remaining: flash the debug build and wire GPIO33.
+> Full write-up and results in [TIMEBASE.md](TIMEBASE.md).
+
 Cheapest, sharpest, and needs no purchases beyond a ~$15 logic analyzer.
 Measures `E_c` — whether the *served* time actually tracks the PPS edge.
 

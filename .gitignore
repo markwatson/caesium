@@ -7,3 +7,10 @@ pkg/
 *.log
 *.tmp
 .claude/settings.local.json
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Saleae captures
+*.sal

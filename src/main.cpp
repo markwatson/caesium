@@ -20,6 +20,65 @@
 #include "gps_time.h"
 #include "ntp.h"
 
+#ifdef TIMEBASE_PULSE
+/*
+ * Time-base validation pulse (debug builds only — see TIMEBASE.md).
+ *
+ * Fires a pulse one *served* second after the PPS that the NTP time base is
+ * currently interpolating from. Scope it against the real PPS on GPIO16:
+ * the next real PPS arrives one *true* second after that reference edge, so
+ *
+ *     pulse landing AFTER the PPS edge = Caesium serving slow by that much.
+ *
+ * Both edges originate on the device, so the measurement is a pure interval
+ * and never touches the host clock.
+ *
+ * GPIO33 is free on the EXT header and output-capable. GPIO34-39 are
+ * input-only; GPIO17 is the Ethernet clock and is not led out.
+ */
+#include "soc/gpio_struct.h"
+
+#define TIMEBASE_PIN 33
+#define TIMEBASE_BIT (1UL << (TIMEBASE_PIN - 32)) // GPIO32+ live in the out1 bank
+#define TIMEBASE_ARM_WINDOW_US 2000               // only busy-wait when this close
+#define TIMEBASE_PULSE_WIDTH_US 50
+
+// Count of pulses actually emitted, for the periodic debug line.
+static uint32_t timebasePulseCount = 0;
+
+/*
+ * Emit the pulse if we are within the arming window of the next served second.
+ * Cheap to call every loop() iteration; returns immediately in the common case.
+ */
+static void emitTimebasePulse() {
+  static uint32_t lastPulseSec = 0;
+
+  TimeState s;
+  getTimeStateAtomic(s);
+  if (!s.valid || s.epochSec == lastPulseSec) {
+    return;
+  }
+
+  // One served second after the reference PPS, using the same calibrated
+  // interval that hwTimeToNtp() uses. If the crystal calibration is wrong,
+  // this pulse is wrong by exactly the same amount the served time is.
+  int64_t target = s.ppsTimeMicros + (int64_t)s.usPerPps;
+  int64_t delta = target - esp_timer_get_time();
+  if (delta <= 0 || delta > TIMEBASE_ARM_WINDOW_US) {
+    return; // too early to arm, or already missed it this second
+  }
+
+  lastPulseSec = s.epochSec;
+  while (esp_timer_get_time() < target) {
+    // Busy-wait, sub-microsecond. Bounded by TIMEBASE_ARM_WINDOW_US.
+  }
+  GPIO.out1_w1ts.val = TIMEBASE_BIT;
+  delayMicroseconds(TIMEBASE_PULSE_WIDTH_US);
+  GPIO.out1_w1tc.val = TIMEBASE_BIT;
+  timebasePulseCount++;
+}
+#endif // TIMEBASE_PULSE
+
 // Hostname used for both ETH and mDNS
 const char HOSTNAME[] = "caesium";
 
@@ -151,6 +210,13 @@ void setup() {
   // Initialize PPS interrupt
   initGpsTime(PPS_PIN);
 
+#ifdef TIMEBASE_PULSE
+  pinMode(TIMEBASE_PIN, OUTPUT);
+  digitalWrite(TIMEBASE_PIN, LOW);
+  Serial.printf("[INIT] Time-base validation pulse enabled on GPIO%d\n",
+                TIMEBASE_PIN);
+#endif
+
   // Initialize Ethernet (NTP server starts when we get an IP)
   Serial.println(F("[INIT] Starting Ethernet..."));
   Network.onEvent(onEthEvent);
@@ -184,6 +250,10 @@ void loop() {
           int32_t driftPpm = (int32_t)cal - 1000000;
           Serial.printf("[DRIFT] Crystal: %lu us/pps (%+ld ppm)\n",
                         (unsigned long)cal, (long)driftPpm);
+#ifdef TIMEBASE_PULSE
+          Serial.printf("[TIMEBASE] %lu pulses emitted on GPIO%d\n",
+                        (unsigned long)timebasePulseCount, TIMEBASE_PIN);
+#endif
         }
       }
     }
@@ -207,6 +277,10 @@ void loop() {
       }
     }
   }
+
+#ifdef TIMEBASE_PULSE
+  emitTimebasePulse();
+#endif
 
   // Yield briefly so other FreeRTOS tasks can run
   vTaskDelay(1);
