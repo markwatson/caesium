@@ -3,6 +3,14 @@
 **Status: design sketch. None of this is built.** Items marked **[UNKNOWN]** are
 genuinely unresolved and need investigation before anyone plans around them.
 
+> **2026-08-31 — this is now optional polish, not a fix.** It was written while
+> the device was still a suspect for the 0.81 ms gap. It is not: `E_c` measured
+> +5.07 us, and >=0.56 ms of the gap is WAN asymmetry that hardware timestamping
+> on the device cannot touch. See [TIMEBASE.md](TIMEBASE.md). What this document
+> would still buy is *measuring* the packet-path term rather than bounding it,
+> and the asymmetry trap below (fixing TX alone makes accuracy worse) still
+> applies in full.
+
 Measurement background is in [report_20260830.log](report_20260830.log).
 
 ## Why bother

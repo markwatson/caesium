@@ -257,8 +257,22 @@ Recorded because they explain why the conclusions are shaped as they are.
 
 ## Still open
 
-- `TODO.md` soak item is unchecked but is now done, with 28.8 days behind it.
-- `HANDOFF.md`, `HWTIMESTAMPING.md`, `session.md` are untracked and need
-  committing to travel. `report_*.log` are gitignored via `*.log` and will not.
-- `AGENTS.md` points at `~/.platformio/penv/bin/pio`, which does not exist on
-  serv1.
+Resolved since this was written (2026-08-31):
+
+- ~~`TODO.md` soak item unchecked~~ — now ticked, 28.8 days behind it.
+- ~~`HANDOFF.md`, `HWTIMESTAMPING.md`, `session.md` untracked~~ — all tracked
+  and on `main`. `report_*.log` remain gitignored and did not travel, which is
+  why the numbers were inlined into HANDOFF.md.
+- ~~The open question of (a) WAN asymmetry vs (b) Caesium running slow~~ —
+  **resolved as (a)**. The time-base validation pulse measured `E_c` at
+  +5.07 us over 600 s, so the device is ~160x too small to explain the 0.81 ms
+  gap. Method and data in [TIMEBASE.md](TIMEBASE.md).
+
+Genuinely still open:
+
+- `AGENTS.md` points at `~/.platformio/penv/bin/pio`, which exists on the Mac
+  but not on serv1. Fine as written for the machine that builds.
+- The PPS is still trusted against UTC on the NEO-M9N's ~30 ns spec. Closing
+  that needs the independent reference clock parked in HANDOFF.md.
+- The device's packet-path term is *bounded* at 0.25 ms, not measured.
+  Measuring it is what RFC 9769 interleaved mode plus RX timestamping buys.
