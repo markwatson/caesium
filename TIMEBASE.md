@@ -327,6 +327,26 @@ before the onset and is the trustworthy dataset.
 
 ### What this does not prove
 
+**`E_c` is blind to whole-second errors.** This is structural, not a limitation
+of the run length. Commit `b7fa5eb` fixes a bug where PVT(n) could pair with
+PPS(n+1)'s timestamp under Core 1 starvation, publishing a `timeState` exactly
+1.000000 s in the past. Trace the pulse in that state: `target` becomes
+`ppsTimeMicros(n+1) + usPerPps`, so it fires one second after PPS(n+1) and lands
+on PPS(n+2). Nearest-edge matching then reports a *small* `E_c`, exactly as if
+nothing were wrong.
+
+So this measurement certifies the **sub-second phase** of the time base and says
+nothing about **epoch labelling**. The two are complementary. It does not weaken
+the conclusions here — the 0.81 ms gap is sub-second, and a 1 s error would have
+been unmissable across 4119 chrony samples at sd 0.103 ms — but do not read
+`E_c` as validating the whole time base.
+
+Note also that the load test above ran on **pre-`b7fa5eb` firmware**, at exactly
+the request rate that provokes the starvation path, and recorded only RTT rather
+than offset. It therefore could not have detected that failure mode either.
+Re-running the flood on merged firmware while recording NTP offset would close
+this; the rig is described above.
+
 The served time tracks the PPS. It does **not** independently verify the PPS
 against UTC — that still rests on the NEO-M9N's ~30 ns spec. The assumption is
 far better supported than before (0 dropped pulses across 874 s of capture,
