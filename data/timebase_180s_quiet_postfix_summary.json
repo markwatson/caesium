@@ -1,0 +1,26 @@
+{
+ "mode": "timebase",
+ "duration_s": 180.0,
+ "interference_edges": 0,
+ "pps": {
+  "edges": 180,
+  "period_mean_s": 0.9999892695530725,
+  "period_sd_ns": 63.578757328066445,
+  "period_pp_ns": 280.0000238334377,
+  "analyzer_ppm": -10.73044692745384,
+  "dropped_pulses": 0,
+  "wander_sd_ns": 1252.7587939668344,
+  "wander_pp_ns": 4480.005245000029,
+  "quantization_ns": 10.0,
+  "width_mean_ms": 99.99893227777798,
+  "width_sd_ns": 10.425958916159825
+ },
+ "timebase": {
+  "pulses": 180,
+  "E_c_median_us": 5.12000000174595,
+  "E_c_mean_us": 5.1613888891632875,
+  "E_c_sd_us": 0.20606839122361315,
+  "E_c_min_us": 4.929999988689815,
+  "E_c_max_us": 7.310000000870787
+ }
+}

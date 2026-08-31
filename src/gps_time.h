@@ -86,4 +86,11 @@ bool consumeSyncEvent();
  */
 void latchUartCycleSequence();
 
+/**
+ * Number of PVT publishes dropped because the PPS/PVT pairing could not be
+ * trusted. Non-zero means this device was starved across a second boundary;
+ * a steadily climbing value is worth investigating.
+ */
+uint32_t getDroppedPairingCount();
+
 #endif // GPS_TIME_H

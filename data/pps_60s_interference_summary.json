@@ -1,0 +1,17 @@
+{
+ "mode": "pps",
+ "duration_s": 60.0,
+ "pps": {
+  "edges": 3306,
+  "period_mean_s": 0.018180230148260212,
+  "period_sd_ns": 12360850.269380264,
+  "period_pp_ns": 115550349.99999237,
+  "analyzer_ppm": -981819.7698517398,
+  "dropped_pulses": 0,
+  "wander_sd_ns": 28567282.9011483,
+  "wander_pp_ns": 139113914.45783627,
+  "quantization_ns": 10.0,
+  "width_mean_ms": 3.027292683000574,
+  "width_sd_ns": 13188407.59114201
+ }
+}

@@ -1,0 +1,19 @@
+{
+ "duration_s": 180.0,
+ "ntp_queries": 838510,
+ "req_per_s": 4711,
+ "ntp_rtt_median_ms": 1.259,
+ "ntp_rtt_p99_ms": 1.406,
+ "ntp_failures": 0,
+ "pps_edges": 180,
+ "pulses": 180,
+ "E_c_median_us": 22.9,
+ "E_c_mean_us": 42.537,
+ "E_c_sd_us": 43.74,
+ "E_c_min_us": 4.94,
+ "E_c_max_us": 189.49,
+ "quiet_baseline": {
+  "E_c_median_us": 5.07,
+  "E_c_sd_us": 0.246
+ }
+}

@@ -36,6 +36,16 @@ static volatile bool ppsIntervalValid = false;
 static volatile uint32_t ppsSequence = 0;
 static volatile uint32_t ppsSeqAtUartRead = 0;
 
+// Longest gap between loop iterations that still lets us trust a buffered PVT.
+// The PVT for a given second lands ~34ms after its PPS, so the stale-pairing
+// window needs a gap of ~966ms. 500ms is comfortably conservative and costs at
+// most one sync when it trips.
+#define UART_CYCLE_MAX_GAP_US 500000
+
+static volatile int64_t lastLatchUs = 0;
+static volatile bool uartCycleSuspect = false;
+static volatile uint32_t droppedPairings = 0;
+
 // Debug counters
 volatile uint32_t ppsCount = 0;
 volatile bool ppsTriggered = false;
@@ -167,7 +177,24 @@ void pvtCallback(UBX_NAV_PVT_data_t *pvtData) {
   // has already been overwritten. Pairing them would publish a 1s-stale
   // time. Drop the publish; the next edge+PVT will sync cleanly.
   if (ppsSequence != ppsSeqAtUartRead) {
+    droppedPairings++;
     ppsFlag = false;
+    portEXIT_CRITICAL(&timeStateMux);
+    return;
+  }
+  // The same failure reached the other way. The sequence check only catches an
+  // edge that fires *after* the latch. If this task was never scheduled for a
+  // full second, the latch itself ran after the edge and the counters compare
+  // equal — yet the PVT we just parsed still predates the edge whose timestamp
+  // we are holding. Nothing else distinguishes them: that timestamp is fresh
+  // either way, so the ppsAge guard above passes too. The gap between loop
+  // iterations is the only remaining evidence.
+  //
+  // Leave ppsFlag set. The edge itself is perfectly good — only this PVT is
+  // stale — so the next PVT pairs with it correctly one second from now rather
+  // than waiting two.
+  if (uartCycleSuspect) {
+    droppedPairings++;
     portEXIT_CRITICAL(&timeStateMux);
     return;
   }
@@ -182,9 +209,20 @@ void pvtCallback(UBX_NAV_PVT_data_t *pvtData) {
 }
 
 void latchUartCycleSequence() {
+  int64_t now = esp_timer_get_time();
   portENTER_CRITICAL(&timeStateMux);
+  uartCycleSuspect =
+      (lastLatchUs != 0) && ((now - lastLatchUs) > UART_CYCLE_MAX_GAP_US);
+  lastLatchUs = now;
   ppsSeqAtUartRead = ppsSequence;
   portEXIT_CRITICAL(&timeStateMux);
+}
+
+uint32_t getDroppedPairingCount() {
+  portENTER_CRITICAL(&timeStateMux);
+  uint32_t n = droppedPairings;
+  portEXIT_CRITICAL(&timeStateMux);
+  return n;
 }
 
 void initGpsTime(uint8_t ppsPin) {
