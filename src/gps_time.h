@@ -78,13 +78,12 @@ void setLeapIndicator(uint8_t li);
 bool consumeSyncEvent();
 
 /**
- * Snapshot the current PPS edge counter into the "before UART read" slot.
- * Must be called at the top of every loop iteration that may end up
- * invoking pvtCallback (i.e. before checkUblox/checkCallbacks). The
- * callback compares the live counter against this snapshot to detect a
- * PPS edge that fired while the PVT was queued in the UART FIFO.
+ * Open a UART service cycle. Call at the top of every loop iteration, before
+ * checkUblox/checkCallbacks. Records the PPS edge count and the time since the
+ * last cycle; pvtCallback uses both to reject a PVT that belongs to a
+ * different second than the PPS timestamp it would be paired with.
  */
-void latchUartCycleSequence();
+void beginUartCycle();
 
 /**
  * Number of PVT publishes dropped because the PPS/PVT pairing could not be

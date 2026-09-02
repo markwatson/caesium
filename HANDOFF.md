@@ -94,63 +94,16 @@ closing it is the next action.
 
 ---
 
-## NEXT ACTION: time-base validation pulse
+## Time-base validation pulse — DONE 2026-08-31
 
-> **Status 2026-08-31 — DONE. `E_c` = +5.07 us over 600 pulses.** Landed in
-> row 1 of the decision tree below: the served time tracks the PPS, so
-> `0.81 - 0.25` = **>=0.56 ms is WAN**. The pulse lives in `src/main.cpp`
-> behind `-D TIMEBASE_PULSE` (env `esp32-poe-iso-timebase`) and drives GPIO33
-> and GPIO32 together. Method, tooling and full numbers in
-> [TIMEBASE.md](TIMEBASE.md).
+`E_c` = **+5.07 us** over 600 pulses: the served time tracks the PPS, so
+`0.81 - 0.25` = **>=0.56 ms is WAN**. That was row 1 of the decision tree this
+section used to carry; the other two rows (device at fault, or inconclusive and
+needing the parked reference clock) did not happen.
 
-Cheapest, sharpest, and needs no purchases beyond a ~$15 logic analyzer.
-Measures `E_c` — whether the *served* time actually tracks the PPS edge.
-
-Add a debug pulse fired from the same time base that serves NTP:
-
-```c
-#define TIMEBASE_PIN 33          // free on EXT header; NOT bootstrap/SD/input-only
-                                 // avoid GPIO17 — Ethernet clock, not led out
-
-// setup(): pinMode(TIMEBASE_PIN, OUTPUT);
-
-// loop():
-static uint32_t lastPulseSec = 0;
-TimeState s;
-getTimeStateAtomic(s);
-if (s.valid && s.epochSec != lastPulseSec) {
-  int64_t target = s.ppsTimeMicros + s.usPerPps;   // one *served* second after last PPS
-  int64_t delta  = target - esp_timer_get_time();
-  if (delta > 0 && delta < 2000) {                 // only arm when close
-    lastPulseSec = s.epochSec;
-    while (esp_timer_get_time() < target) { }      // busy-wait, sub-us
-    digitalWrite(TIMEBASE_PIN, HIGH);
-    esp_rom_delay_us(50);
-    digitalWrite(TIMEBASE_PIN, LOW);
-  }
-}
-```
-
-**Probe:** GPIO16 (PPS) on ch1, GPIO33 on ch2. Trigger ch1 rising. Measure
-edge-to-edge.
-
-**Reading it:** the pulse fires one *served* second after the last PPS; the next
-*real* PPS arrives one true second after it. ISR latency makes `ppsTimeMicros`
-late, which makes the pulse late **and** the served time slow by the same amount.
-
-> **Pulse landing after the PPS edge = Caesium running slow by exactly that much.**
-
-Caveats: `digitalWrite` adds ~1 µs constant overhead (use direct register writes
-on a pin <32 for sub-µs). Blocks `loop()` up to 2 ms/sec — harmless, NTP is
-served from `tcpip_thread`, but keep it to a debug build.
-
-### Decision tree
-
-| Result | Meaning | Then |
-|---|---|---|
-| Pulse within ~10 µs of PPS | `E_c ≈ 0` confirmed | 0.81 − 0.25 = **≥0.56 ms is WAN**. Investigation closed. HWTIMESTAMPING.md becomes optional polish. |
-| Pulse ~800 µs late | Device time base IS the culprit | WAN theory dead. Debug PPS↔epoch pairing and interpolation. |
-| Something in between | Partial | Need the local reference clock (parked item below). |
+The pulse shipped in `src/main.cpp` behind `-D TIMEBASE_PULSE` (env
+`esp32-poe-iso-timebase`), driving GPIO33 and GPIO32 together. Method, wiring,
+tooling and full numbers are in [TIMEBASE.md](TIMEBASE.md).
 
 ---
 
@@ -214,10 +167,28 @@ fixed install. Sub-µs improvement, free.
 | File | Purpose | Tracked? |
 |---|---|---|
 | `HANDOFF.md` | This file | yes |
-| `HWTIMESTAMPING.md` | Design sketch, conditional on the pulse test | yes |
+| `TIMEBASE.md` | The measurement that closed the investigation | yes |
+| `HWTIMESTAMPING.md` | Design sketch; optional polish, not a fix | yes |
 | `report_20260830.log` | Full 28.8-day analysis + notes | **no — `*.log` ignored** |
 | `report_20260401.log` | April run, for comparison | **no — `*.log` ignored** |
 | `analyze_chrony.py` | Log analyser. Only reads un-rotated logs — concatenate `.1`–`.4` first or you get ~18 h instead of 29 days | yes |
 
-To resume on another machine, commit `HANDOFF.md` and `HWTIMESTAMPING.md`. The
-reports will not travel; every number needed is reproduced above.
+The reports do not travel with the repo; every number needed is reproduced
+above.
+
+---
+
+## Corrections made along the way
+
+Kept because they explain why the conclusions are shaped as they are, and to
+stop them being re-derived.
+
+| Claim | Correction |
+|---|---|
+| "Bias can't be network asymmetry — it doesn't scale with RTT" | **Wrong.** Asymmetry in the *shared last mile* is a constant absolute offset regardless of remote distance. Exactly this signature. |
+| "The differential roughly doubled since April" | **Wrong.** Compared Caesium's raw offset across two discipline regimes. Like-for-like it is stable: 0.97 → 0.81 ms. |
+| "Delay/jitter slightly better than April" | Marginally *worse* (0.693→0.701 ms, 0.020→0.024 ms), inside run-to-run noise. |
+| "DesignWare MACs generally include a 1588 unit, so this is plausible" | **Wrong for ESP32.** No unit exists; the TRM listing it was an erratum. |
+| "Five independent stratum-1 sources agree" | Google is unusable: anycast, ICMP min 2.22 ms vs NTP peer delay 13.78 ms. Effective references: **two organisations**. |
+| "One switch between host and device" | **Routed, not switched** — different subnet, via the gateway. |
+| "Sharing one GPS is better (common-mode cancellation)" | Over-sold. The cancelled error is ~30 ns against 800,000 ns — irrelevant at this scale. |

@@ -22,41 +22,23 @@
 
 #ifdef TIMEBASE_PULSE
 /*
- * Time-base validation pulse (debug builds only — see TIMEBASE.md).
- *
- * Fires a pulse one *served* second after the PPS that the NTP time base is
- * currently interpolating from. Scope it against the real PPS on GPIO16:
- * the next real PPS arrives one *true* second after that reference edge, so
- *
- *     pulse landing AFTER the PPS edge = Caesium serving slow by that much.
- *
- * Both edges originate on the device, so the measurement is a pure interval
- * and never touches the host clock.
- *
- * The pulse is driven on GPIO33 *and* GPIO32 simultaneously. Both are free on
- * the EXT header, both are output-capable, and both live in the out1 register
- * bank -- so a single write drives them with no skew between them. Probing
- * either one gives the same measurement, which removes a fiddly pin-counting
- * step on a dense 10-pin header where GPIO34-39 are input-only and a slip onto
- * one of them is indistinguishable from a bad contact.
- *
- * GPIO17 is the Ethernet clock and is not led out; do not use it.
+ * Time-base validation pulse (debug builds only). Fires one *served* second
+ * after the PPS the NTP path is interpolating from; scoped against the real
+ * PPS on GPIO16, a pulse landing late means Caesium is serving slow by that
+ * much. Both pins are in the out1 bank, so one write drives them with no skew.
+ * Method, wiring and results: TIMEBASE.md.
  */
 #include "soc/gpio_struct.h"
 
 #define TIMEBASE_PIN 33     // primary, 2 pins above the PPS on the EXT header
 #define TIMEBASE_PIN_ALT 32 // secondary, directly adjacent to the PPS pin
 #define TIMEBASE_BIT ((1UL << (TIMEBASE_PIN - 32)) | (1UL << (TIMEBASE_PIN_ALT - 32)))
-#define TIMEBASE_ARM_WINDOW_US 2000               // only busy-wait when this close
+#define TIMEBASE_ARM_WINDOW_US 2000 // only busy-wait when this close
 #define TIMEBASE_PULSE_WIDTH_US 50
 
-// Count of pulses actually emitted, for the periodic debug line.
 static uint32_t timebasePulseCount = 0;
 
-/*
- * Emit the pulse if we are within the arming window of the next served second.
- * Cheap to call every loop() iteration; returns immediately in the common case.
- */
+// Cheap to call every loop() iteration; returns immediately in the common case.
 static void emitTimebasePulse() {
   static uint32_t lastPulseSec = 0;
 
@@ -239,11 +221,7 @@ void setup() {
 }
 
 void loop() {
-  // Snapshot the PPS edge counter before touching the UART. If a PPS edge
-  // fires while we're parsing a buffered PVT message, pvtCallback uses
-  // this snapshot to detect that it's about to pair the new edge's
-  // timestamp with the old edge's PVT (off by exactly 1s) and aborts.
-  latchUartCycleSequence();
+  beginUartCycle(); // must precede checkUblox(); see gps_time.h
 
   // Drive the SparkFun library: read UART bytes and assemble packets,
   // then fire any pending callbacks (e.g. pvtCallback).
@@ -306,14 +284,10 @@ void loop() {
 
 #ifdef STARVE_TEST
   /*
-   * Deliberately starve loop() across a second boundary, to exercise the
-   * PPS/PVT pairing guards. Debug builds only — never ship this.
-   *
-   * The stale-pairing window is narrow: the loop must resume after PPS(n+1)
-   * but before PVT(n+1) lands ~34ms later, with PVT(n) still unread in the
-   * UART FIFO. Stalling once every ~6 seconds walks the resume phase forward
-   * 50ms each time, sweeping the whole second across a run, while leaving
-   * several clean seconds in between so normal syncing is still exercised.
+   * Deliberately starve loop() across a second boundary to exercise the
+   * PPS/PVT pairing guards. Never ship this. Stalling 1050ms every ~6s walks
+   * the resume phase forward 50ms each time, sweeping the narrow window
+   * instead of waiting to hit it by luck.
    */
   static uint32_t lastStarveAt = 0;
   if (ppsCount - lastStarveAt >= 6) {

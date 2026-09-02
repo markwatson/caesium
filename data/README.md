@@ -48,6 +48,8 @@ timestamps are deliberately absent; see the anchoring file below for why.
 | `starvation_prefix.json` | Continuous-starvation variant, pre-fix: 803 errors |
 | `starvation_postfix.json` | Continuous-starvation variant, fixed: 0 errors, device correctly reports LI=3 |
 | `starvation_production_normal.json` | Production build, no injection: 4294 samples, 0 errors, sd 0.191 ms |
+| `starvation_release_final.json` | Final shipped build: 7139 samples, 0 errors, 0 unsynced, 0 failed |
+| `starvation_network_recheck.json` | Re-check over the normal network path: 3302 samples, 0 errors, 0 unsynced |
 | `anchor_test_phases.json` | 8 captures of the same PPS in host-clock phase. **115.7 ms spread** — why absolute timestamps cannot anchor this measurement |
 
 ## Reproducing

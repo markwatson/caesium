@@ -28,23 +28,19 @@ static volatile bool ppsFlag = false;
 static volatile int64_t ppsIntervalUs = 0;
 static volatile bool ppsIntervalValid = false;
 
-// Monotonic edge counter; main loop latches it at the top of every iteration
-// into ppsSeqAtUartRead. pvtCallback compares the live counter against the
-// latched value to detect a PPS edge that fired while a PVT message was
-// queued — pairing the new edge's timestamp with the old edge's PVT would
-// publish time that's exactly 1s in the past.
+// PPS/PVT pairing guard state — see beginUartCycle() in gps_time.h.
 static volatile uint32_t ppsSequence = 0;
 static volatile uint32_t ppsSeqAtUartRead = 0;
-
-// Longest gap between loop iterations that still lets us trust a buffered PVT.
-// The PVT for a given second lands ~34ms after its PPS, so the stale-pairing
-// window needs a gap of ~966ms. 500ms is comfortably conservative and costs at
-// most one sync when it trips.
-#define UART_CYCLE_MAX_GAP_US 500000
-
-static volatile int64_t lastLatchUs = 0;
+static volatile int64_t lastCycleStartUs = 0;
 static volatile bool uartCycleSuspect = false;
 static volatile uint32_t droppedPairings = 0;
+
+// A PVT lands ~34ms after its PPS, so a stale pairing needs a loop gap of
+// ~966ms. 500ms is conservative and costs at most one sync when it trips.
+#define UART_CYCLE_MAX_GAP_US 500000
+
+// A PPS timestamp older than this means the GPS stopped pulsing.
+#define PPS_MAX_AGE_US 500000
 
 // Debug counters
 volatile uint32_t ppsCount = 0;
@@ -128,11 +124,11 @@ void pvtCallback(UBX_NAV_PVT_data_t *pvtData) {
     return;
   }
 
-  // Guard: PVT should arrive within ~80ms of PPS. If the PPS timestamp
-  // is >500ms old, a second PPS has likely fired and overwritten the
-  // original — pairing this PVT with it would be off by a full second.
+  // PPS dropout: a PVT still arriving with no recent edge behind it means the
+  // GPS stopped pulsing but kept emitting time messages. (Stale *pairing*,
+  // where both are recent but belong to different seconds, is caught below.)
   int64_t ppsAge = esp_timer_get_time() - capturedPpsUs;
-  if (ppsAge > 500000) {
+  if (ppsAge > PPS_MAX_AGE_US) {
     portENTER_CRITICAL(&timeStateMux);
     ppsFlag = false;
     portEXIT_CRITICAL(&timeStateMux);
@@ -172,28 +168,16 @@ void pvtCallback(UBX_NAV_PVT_data_t *pvtData) {
                               pvtData->hour, pvtData->min, pvtData->sec);
 
   portENTER_CRITICAL(&timeStateMux);
-  // If a PPS edge fired between when this UART cycle started and now, the
-  // PVT we just parsed describes the *previous* edge — but ppsTimestampUs
-  // has already been overwritten. Pairing them would publish a 1s-stale
-  // time. Drop the publish; the next edge+PVT will sync cleanly.
-  if (ppsSequence != ppsSeqAtUartRead) {
-    droppedPairings++;
-    ppsFlag = false;
-    portEXIT_CRITICAL(&timeStateMux);
-    return;
-  }
-  // The same failure reached the other way. The sequence check only catches an
-  // edge that fires *after* the latch. If this task was never scheduled for a
-  // full second, the latch itself ran after the edge and the counters compare
-  // equal — yet the PVT we just parsed still predates the edge whose timestamp
-  // we are holding. Nothing else distinguishes them: that timestamp is fresh
-  // either way, so the ppsAge guard above passes too. The gap between loop
-  // iterations is the only remaining evidence.
-  //
-  // Leave ppsFlag set. The edge itself is perfectly good — only this PVT is
-  // stale — so the next PVT pairs with it correctly one second from now rather
-  // than waiting two.
-  if (uartCycleSuspect) {
+  // Does this PVT actually describe the edge whose timestamp we hold? Two ways
+  // it might not, both from loop() starving across a second boundary, and
+  // neither visible in the timestamp — it is fresh either way, so the dropout
+  // guard above passes:
+  //   - an edge fired after the cycle started: ppsSequence has moved on;
+  //   - the task never ran for a full second, so the cycle started *after* the
+  //     edge and the counters agree. Only the loop gap shows it.
+  // Leave ppsFlag set: the edge is good and only this PVT is stale, so the
+  // next PVT pairs with it one second from now rather than two.
+  if (ppsSequence != ppsSeqAtUartRead || uartCycleSuspect) {
     droppedPairings++;
     portEXIT_CRITICAL(&timeStateMux);
     return;
@@ -208,12 +192,12 @@ void pvtCallback(UBX_NAV_PVT_data_t *pvtData) {
   syncJustCompleted = true;
 }
 
-void latchUartCycleSequence() {
+void beginUartCycle() {
   int64_t now = esp_timer_get_time();
   portENTER_CRITICAL(&timeStateMux);
-  uartCycleSuspect =
-      (lastLatchUs != 0) && ((now - lastLatchUs) > UART_CYCLE_MAX_GAP_US);
-  lastLatchUs = now;
+  uartCycleSuspect = (lastCycleStartUs != 0) &&
+                     ((now - lastCycleStartUs) > UART_CYCLE_MAX_GAP_US);
+  lastCycleStartUs = now;
   ppsSeqAtUartRead = ppsSequence;
   portEXIT_CRITICAL(&timeStateMux);
 }

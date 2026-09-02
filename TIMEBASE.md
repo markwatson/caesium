@@ -5,8 +5,8 @@
 driven through the Logic 2 MCP automation server.
 
 Closes the open item in [HANDOFF.md](HANDOFF.md): *"the GPS time base was never
-actually measured — the weakest link"*. See [session.md](session.md) for the
-full investigation this follows from.
+actually measured — the weakest link"*. HANDOFF.md has the 28.8-day soak and the
+reasoning this follows from.
 
 ---
 
@@ -354,7 +354,7 @@ before the onset and is the trustworthy dataset.
 
 Reviewing `b7fa5eb` before fleet deployment turned up a case its sequence
 counter cannot reach. The counter only catches a PPS edge firing *after*
-`latchUartCycleSequence()`. But that latch is the first statement in `loop()`,
+`beginUartCycle()`. But that latch is the first statement in `loop()`,
 so if the task is simply never **scheduled** for a full second — blocked at
 `vTaskDelay(1)` while `tcpip_thread` holds the core — it resumes, latches
 `ppsSequence` at its already-incremented value, and the comparison comes out
@@ -370,7 +370,7 @@ resume t=1010ms  ->  latch seq = n+1        (edge already fired)
 
 Nothing observable separates the two states: the timestamp is fresh either way,
 so the `ppsAge` check cannot help. The gap between loop iterations is the only
-remaining evidence, so `latchUartCycleSequence()` now records it and marks the
+remaining evidence, so `beginUartCycle()` now records it and marks the
 cycle suspect past `UART_CYCLE_MAX_GAP_US` (500 ms). `pvtCallback` drops such a
 publish but **leaves `ppsFlag` set** — the edge is good, only the PVT is stale,
 so the next PVT pairs correctly one second later rather than two.
@@ -408,6 +408,26 @@ nothing in normal operation.
 > *continuous* starvation it correctly refuses to publish at all and the device
 > reports LI=3 — the right failure direction for a time server, but not a state
 > to ship into.
+
+### Field confirmation — 2 days on the production build
+
+Deployed firmware measured from `serv1` via chrony (`prefer`, poll 1024 s),
+2026-08-31 → 09-01: **311 samples, 0 whole-second errors, 0 unsynchronised,
+leap `N` and stratum 1 throughout.** Offset median -0.006 ms, sd 0.080 ms
+against a pre-fix sd of 0.130 ms over the preceding 8 days on the same config.
+The three worst pre-fix outliers (2.22, 2.14, 1.67 ms) each came with a delay
+of 3.7-4.9 ms against a 0.69 ms median, so they were path congestion, not the
+device.
+
+A second client on a slower path (`screendoor`, delay 5.4-9.1 ms) reads
+device-side `T3-T2` at 26.9 us against serv1's 26.2 us — same device, same
+processing time, different path. Its 1.5 ms offset spread is the path.
+
+This is a light check: at one poll every 17 minutes on an idle device, it
+confirms no regression rather than exercising the starvation path. The induced
+tests above remain the real evidence.
+
+---
 
 ## Shipping
 
